@@ -72,7 +72,21 @@ export class RunRepository {
     const { data, error } = await this.db.from('task_outbox').select('id,run_id,stream,payload,attempts').is('published_at', null).lte('available_at', new Date().toISOString()).order('created_at', { ascending: true }).limit(limit)
     if (error) throw new Error(`Outbox lookup failed: ${error.message}`); return data ?? []
   }
-  async markOutboxPublished(id: string) { const { error } = await this.db.from('task_outbox').update({ published_at: new Date().toISOString() }).eq('id', id).is('published_at', null); if (error) throw new Error(`Outbox update failed: ${error.message}`) }
+  async claimOutbox(limit: number, workerId: string) {
+    const { data, error } = await this.db.rpc('claim_task_outbox', { p_limit: limit, p_worker_id: workerId })
+    if (error) throw new Error(`Outbox claim failed: ${error.message}`)
+    return (data ?? []) as Array<{ id: string; run_id: string; workspace_id: string; stream: string; payload: Record<string, unknown>; attempts: number }>
+  }
+  async markOutboxPublished(id: string, workerId?: string) {
+    let query = this.db.from('task_outbox').update({ published_at: new Date().toISOString(), processing_at: null, locked_by: null }).eq('id', id).is('published_at', null)
+    if (workerId) query = query.eq('locked_by', workerId)
+    const { error } = await query
+    if (error) throw new Error(`Outbox update failed: ${error.message}`)
+  }
+  async releaseOutbox(id: string, workerId: string, errorMessage: string) {
+    const { error } = await this.db.from('task_outbox').update({ processing_at: null, locked_by: null, last_error: errorMessage }).eq('id', id).eq('locked_by', workerId).is('published_at', null)
+    if (error) throw new Error(`Outbox release failed: ${error.message}`)
+  }
   async enqueueRetry(runId: string, delayMs: number) { const { error } = await this.db.from('task_outbox').insert({ run_id: runId, stream: 'ownagent:agent-runs', payload: { runId }, available_at: new Date(Date.now() + delayMs).toISOString() }); if (error) throw new Error(`Retry enqueue failed: ${error.message}`) }
   async getById(runId: string): Promise<AgentRun | null> { const { data, error } = await this.db.from('agent_runs').select('*').eq('id', runId).maybeSingle(); if (error) throw new Error(`Agent run lookup failed: ${error.message}`); return data ? this.toRun(data) : null }
   private async transition(runId: string, status: RunStatus, from: RunStatus[]) { const terminal = ['completed', 'failed', 'canceled', 'interrupted'].includes(status); const update = { status, ...(status === 'running' ? { started_at: new Date().toISOString(), finished_at: null } : terminal ? { finished_at: new Date().toISOString() } : {}), updated_at: new Date().toISOString() }; const { data, error } = await this.db.from('agent_runs').update(update).eq('id', runId).in('status', from).select('id'); if (error) throw new Error(`Agent run transition failed: ${error.message}`); return Boolean(data?.length) }

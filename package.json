@@ -28,6 +28,7 @@
     "ioredis": "^5.6.1",
     "jose": "^6.1.0",
     "langfuse": "^3.38.6",
+    "pg": "^8.23.0",
     "pino": "^9.7.0",
     "ws": "^8.21.3",
     "zod": "^4.4.3"
@@ -36,6 +37,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.3",
     "@types/node": "^22.15.30",
+    "@types/pg": "^8.23.1",
     "@types/supertest": "^6.0.3",
     "@types/ws": "^8.18.1",
     "supertest": "^7.1.1",

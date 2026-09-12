@@ -73,11 +73,17 @@ npm run dev:worker
 
 多实例部署可使用 `docker compose up --build`。Redis Streams 使用 `ownagent:agent-runs`，Postgres `agent_runs` 是任务最终事实来源，`task_outbox` 负责在数据库提交后补发消息。
 
+Outbox 采用 PostgreSQL `LISTEN/NOTIFY` 事件驱动，不使用周期性轮询。Dispatcher 启动和数据库重连时会扫描一次未发布记录；正常创建任务会在事务提交后立即唤醒分发。
+
 执行新增 migration 前，请先确认目标 Supabase 项目和备份策略：
 
 ```text
 supabase/migrations/002_enterprise_foundation.sql
 supabase/migrations/003_realtime_agent.sql
+supabase/migrations/004_outbox_notify.sql
+supabase/migrations/005_realtime_agent_patch.sql
 ```
 
-该迁移只创建 `ownagent` schema 内的表、索引和安全 RPC，不会自动执行其他项目的 migration。
+`005_realtime_agent_patch.sql` 是针对已执行过原始 `003_realtime_agent.sql` 的独立幂等补丁；本次对第三个脚本的修复全部放在该文件中，`003` 本身不需要重复修改或执行。它会补齐事件/Outbox 的非空 Workspace 约束、并发安全的事件序号和审批过期处理。上述迁移只创建或修改 `ownagent` schema 内的对象，不会自动执行其他项目的 migration。
+
+执行顺序为 `001_auth.sql` → `002_enterprise_foundation.sql` → `003_realtime_agent.sql` → `004_outbox_notify.sql` → `005_realtime_agent_patch.sql`。如果前三个脚本已经执行，只需按顺序补执行 `004` 和 `005`；执行前请确认目标 Supabase 项目及备份策略。

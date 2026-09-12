@@ -24,7 +24,7 @@ async function emitEvent(runId: string, event: Record<string, unknown>) {
   try { await queue.publishEvent(runId, event) } catch { /* database remains source of truth */ }
 }
 
-async function processMessage(message: { id: string; values: Record<string, string> }, resumeValue?: unknown, resumeMode?: string) {
+async function processMessage(message: { id: string; values: Record<string, string> }, resumeValue?: unknown, resumeMode?: string, initialInput?: string) {
   const payload = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
   if (!payload.runId) return
   const run = await repository.getById(payload.runId)
@@ -47,7 +47,7 @@ async function processMessage(message: { id: string; values: Record<string, stri
         userId: run.requestedBy,
         workspaceId: run.workspaceId,
         runId: run.id,
-        input: run.input.question,
+        input: initialInput ?? run.input.question,
         conversationId: run.input.conversationId,
       } : new Command({ resume: resumeValue }),
       { configurable: { thread_id: run.threadId, userId: run.requestedBy, workspaceId: run.workspaceId, runId: run.id }, signal: controller.signal }
@@ -67,7 +67,13 @@ async function processMessage(message: { id: string; values: Record<string, stri
   } catch (error) {
     const messageText = error instanceof Error ? error.message : 'Agent run failed'
     abortControllers.delete(run.id)
-    if (controller.signal.aborted) { const event = await repository.appendEvent(run.id, 'interrupted', { reason: 'user_cancelled' }); await emitEvent(run.id, { type: 'interrupted', runId: run.id, sequence: event.sequence, workspaceId: run.workspaceId }); return }
+    if (controller.signal.aborted) {
+      const current = await repository.getById(run.id)
+      const eventType = current?.status === 'canceled' ? 'canceled' : 'interrupted'
+      const event = await repository.appendEvent(run.id, eventType, { reason: 'user_cancelled' })
+      await emitEvent(run.id, { type: eventType === 'canceled' ? 'interrupted' : 'interrupted', runId: run.id, sequence: event.sequence, status: current?.status ?? 'interrupted', workspaceId: run.workspaceId })
+      return
+    }
     const next = await repository.markFailed(run.id, 'AGENT_ERROR', messageText, true)
     if (next?.status === 'queued')
       await repository.enqueueRetry(run.id, 2 ** Math.max(0, next.attempt - 1) * 1000)
@@ -81,7 +87,7 @@ async function processControl(message: { id: string; values: Record<string, stri
   if (!payload.runId) return
   if (payload.controlType === 'interrupt') { abortControllers.get(payload.runId)?.abort(); await repository.markInterrupted(payload.runId); if (payload.controlId) await repository.markControlProcessed(payload.runId, payload.controlId); return }
   const run = await repository.getById(payload.runId); if (!run || run.status !== 'queued') return
-  await processMessage({ id: message.id, values: { payload: JSON.stringify({ runId: run.id }) } }, payload.controlType === 'follow_up' ? payload.question : payload.value, payload.resumeMode)
+  await processMessage({ id: message.id, values: { payload: JSON.stringify({ runId: run.id }) } }, payload.controlType === 'follow_up' ? payload.question : payload.value, payload.resumeMode, payload.controlType === 'follow_up' ? payload.question : undefined)
   if (payload.controlId) await repository.markControlProcessed(payload.runId, payload.controlId)
 }
 

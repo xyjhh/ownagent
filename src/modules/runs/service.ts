@@ -13,7 +13,9 @@ export class RunService {
   async cancel(context: WorkspaceContext, runId: string) {
     const run = await this.assertController(context, runId)
     await this.repository.markCanceled(runId)
-    await this.repository.insertControl(context, runId, crypto.randomUUID(), 'interrupt', { reason: 'user_cancelled' })
+    const controlId = String(crypto.randomUUID())
+    await this.repository.insertControl(context, runId, controlId, 'interrupt', { reason: 'user_cancelled' })
+    await this.queue.publish(this.config.controlStream ?? this.config.stream, { runId, controlId, controlType: 'interrupt', reason: 'user_cancelled' })
     const event = await this.repository.appendEvent(runId, 'canceled', { by: context.userId })
     await this.publish(runId, { type: 'interrupted', runId, sequence: event.sequence, status: 'canceled', workspaceId: context.workspaceId })
     return this.repository.get(context, run.id)
