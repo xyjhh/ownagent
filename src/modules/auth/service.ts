@@ -3,7 +3,13 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { SignJWT, jwtVerify } from 'jose'
 import { durationToSeconds, type AppConfig } from '../../config/env.js'
 import { ApiError, unauthorized } from './errors.js'
-import type { AuthRepository, PublicUser, RefreshTokenRecord, TokenPair, UserRecord } from './types.js'
+import type {
+  AuthRepository,
+  PublicUser,
+  RefreshTokenRecord,
+  TokenPair,
+  UserRecord,
+} from './types.js'
 
 export class AuthService {
   private readonly accessTokenSeconds: number
@@ -11,14 +17,23 @@ export class AuthService {
   private readonly jwtKey: Uint8Array
   private readonly previousJwtKey?: Uint8Array
 
-  constructor(private readonly repository: AuthRepository, private readonly config: AppConfig) {
+  constructor(
+    private readonly repository: AuthRepository,
+    private readonly config: AppConfig
+  ) {
     this.accessTokenSeconds = durationToSeconds(config.ACCESS_TOKEN_TTL)
     this.refreshTokenSeconds = durationToSeconds(config.REFRESH_TOKEN_TTL)
     this.jwtKey = new TextEncoder().encode(config.AUTH_JWT_SECRET)
-    this.previousJwtKey = config.AUTH_JWT_PREVIOUS_SECRET ? new TextEncoder().encode(config.AUTH_JWT_PREVIOUS_SECRET) : undefined
+    this.previousJwtKey = config.AUTH_JWT_PREVIOUS_SECRET
+      ? new TextEncoder().encode(config.AUTH_JWT_PREVIOUS_SECRET)
+      : undefined
   }
 
-  async login(email: string, password: string, metadata?: { userAgent?: string; ipHash?: string }): Promise<TokenPair> {
+  async login(
+    email: string,
+    password: string,
+    metadata?: { userAgent?: string; ipHash?: string }
+  ): Promise<TokenPair> {
     const user = await this.repository.findUserByEmail(normalizeEmail(email))
     if (!user || !user.isActive || !(await this.verifyPassword(password, user.passwordHash))) {
       throw unauthorized()
@@ -65,7 +80,11 @@ export class AuthService {
 
   async logout(refreshToken: string): Promise<void> {
     const record = await this.repository.findRefreshTokenByHash(hashToken(refreshToken))
-    if (record && !record.revokedAt) { await this.repository.revokeRefreshToken(record.id); if (record.sessionId && this.repository.revokeSession) await this.repository.revokeSession(record.sessionId) }
+    if (record && !record.revokedAt) {
+      await this.repository.revokeRefreshToken(record.id)
+      if (record.sessionId && this.repository.revokeSession)
+        await this.repository.revokeSession(record.sessionId)
+    }
   }
 
   async me(userId: string): Promise<PublicUser> {
@@ -86,11 +105,19 @@ export class AuthService {
     return this.publicUser(user)
   }
 
-  async verifyAccessToken(token: string): Promise<{ userId: string; email: string; sessionId?: string }> {
+  async verifyAccessToken(
+    token: string
+  ): Promise<{ userId: string; email: string; sessionId?: string }> {
     try {
-      const options = { algorithms: ['HS256'], issuer: this.config.AUTH_JWT_ISSUER, audience: this.config.AUTH_JWT_AUDIENCE }
+      const options = {
+        algorithms: ['HS256'],
+        issuer: this.config.AUTH_JWT_ISSUER,
+        audience: this.config.AUTH_JWT_AUDIENCE,
+      }
       let result
-      try { result = await jwtVerify(token, this.jwtKey, options) } catch (currentError) {
+      try {
+        result = await jwtVerify(token, this.jwtKey, options)
+      } catch (currentError) {
         if (!this.previousJwtKey) throw currentError
         result = await jwtVerify(token, this.previousJwtKey, options)
       }
@@ -120,13 +147,14 @@ export class AuthService {
     existingRaw?: string,
     existingId?: string,
     existingFamilyId?: string,
-    metadata?: { userAgent?: string; ipHash?: string },
+    metadata?: { userAgent?: string; ipHash?: string }
   ): Promise<TokenPair> {
     const sessionId = existingId ?? randomUUID()
     const refreshRaw = existingRaw ?? randomToken()
     const familyId = existingFamilyId ?? randomUUID()
     if (!existingRaw) {
-      if (this.repository.createSession) await this.repository.createSession({ id: sessionId, userId: user.id, ...metadata })
+      if (this.repository.createSession)
+        await this.repository.createSession({ id: sessionId, userId: user.id, ...metadata })
       await this.repository.createRefreshToken({
         id: sessionId,
         familyId,

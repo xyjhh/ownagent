@@ -93,18 +93,38 @@ export class SupabaseAuthRepository implements AuthRepository {
     if (error) databaseError(error, 'refresh-token family revocation')
   }
 
-  async createSession(input: { id: string; userId: string; userAgent?: string; ipHash?: string }): Promise<void> {
-    const { error } = await this.db.from('auth_sessions').insert({ id: input.id, user_id: input.userId, user_agent: input.userAgent ?? null, ip_hash: input.ipHash ?? null })
+  async createSession(input: {
+    id: string
+    userId: string
+    userAgent?: string
+    ipHash?: string
+  }): Promise<void> {
+    const { error } = await this.db
+      .from('auth_sessions')
+      .insert({
+        id: input.id,
+        user_id: input.userId,
+        user_agent: input.userAgent ?? null,
+        ip_hash: input.ipHash ?? null,
+      })
     if (error) databaseError(error, 'session creation')
   }
 
   async revokeSession(id: string): Promise<void> {
-    const { error } = await this.db.from('auth_sessions').update({ revoked_at: new Date().toISOString() }).eq('id', id).is('revoked_at', null)
+    const { error } = await this.db
+      .from('auth_sessions')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('id', id)
+      .is('revoked_at', null)
     if (error) databaseError(error, 'session revocation')
   }
 
   async findSession(id: string): Promise<{ revokedAt: string | null } | null> {
-    const { data, error } = await this.db.from('auth_sessions').select('revoked_at').eq('id', id).maybeSingle()
+    const { data, error } = await this.db
+      .from('auth_sessions')
+      .select('revoked_at')
+      .eq('id', id)
+      .maybeSingle()
     if (error) databaseError(error, 'session lookup')
     return data ? { revokedAt: data.revoked_at ? String(data.revoked_at) : null } : null
   }

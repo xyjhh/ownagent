@@ -20,7 +20,9 @@ export function createAuthRouter(auth: AuthService, config?: AppConfig): Router 
     try {
       const input = credentialsSchema.safeParse(request.body)
       if (!input.success) throw badRequest('email and password are required')
-      const result = await auth.login(input.data.email, input.data.password, { userAgent: request.get('user-agent') ?? undefined })
+      const result = await auth.login(input.data.email, input.data.password, {
+        userAgent: request.get('user-agent') ?? undefined,
+      })
       if (config) setAuthCookies(response, config, result.accessToken, result.refreshToken)
       response.json(result)
     } catch (error) {
@@ -31,7 +33,11 @@ export function createAuthRouter(auth: AuthService, config?: AppConfig): Router 
   router.post('/refresh', async (request, response, next) => {
     try {
       const input = refreshSchema.safeParse(request.body)
-      const refreshToken = input.success ? input.data.refreshToken : (config ? refreshCookie(request, config) : undefined)
+      const refreshToken = input.success
+        ? input.data.refreshToken
+        : config
+          ? refreshCookie(request, config)
+          : undefined
       if (!refreshToken) throw badRequest('refreshToken is required')
       const result = await auth.refresh(refreshToken)
       if (config) setAuthCookies(response, config, result.accessToken, result.refreshToken)
@@ -44,7 +50,11 @@ export function createAuthRouter(auth: AuthService, config?: AppConfig): Router 
   router.post('/logout', async (request, response, next) => {
     try {
       const input = refreshSchema.safeParse(request.body)
-      const refreshToken = input.success ? input.data.refreshToken : (config ? refreshCookie(request, config) : undefined)
+      const refreshToken = input.success
+        ? input.data.refreshToken
+        : config
+          ? refreshCookie(request, config)
+          : undefined
       if (refreshToken) await auth.logout(refreshToken)
       if (config) clearAuthCookies(response, config)
       response.status(204).send()

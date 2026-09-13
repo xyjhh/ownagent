@@ -16,12 +16,16 @@ export class HealthService {
     private readonly embedding = new EmbeddingClient(config),
     private readonly reranker = new RerankerClient(config),
     private readonly queue?: RedisStreams,
-    private readonly tracer?: LangfuseTracer,
+    private readonly tracer?: LangfuseTracer
   ) {}
 
   async ready() {
     const supabase = await this.supabaseStatus()
-    const [embedding, reranker, redis] = await Promise.all([this.embedding.health(), this.reranker.health(), this.queue?.health() ?? Promise.resolve('unavailable' as const)])
+    const [embedding, reranker, redis] = await Promise.all([
+      this.embedding.health(),
+      this.reranker.health(),
+      this.queue?.health() ?? Promise.resolve('unavailable' as const),
+    ])
     const dependencies = {
       supabase,
       deepseek: (this.deepseek.isConfigured() ? 'configured' : 'unavailable') as DependencyStatus,

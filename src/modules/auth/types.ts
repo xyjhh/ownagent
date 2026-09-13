@@ -46,6 +46,11 @@ export interface AuthRepository {
   revokeRefreshToken(id: string, replacedBy?: string): Promise<boolean>
   revokeRefreshTokenFamily(familyId: string): Promise<void>
   findSession?(id: string): Promise<{ revokedAt: string | null } | null>
-  createSession?(input: { id: string; userId: string; userAgent?: string; ipHash?: string }): Promise<void>
+  createSession?(input: {
+    id: string
+    userId: string
+    userAgent?: string
+    ipHash?: string
+  }): Promise<void>
   revokeSession?(id: string): Promise<void>
 }

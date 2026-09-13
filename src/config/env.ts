@@ -7,7 +7,10 @@ const schema = z.object({
   WEB_ORIGIN: z.string().default('http://localhost:3000'),
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
-  SUPABASE_DB_SCHEMA: z.string().regex(/^[a-z_][a-z0-9_]*$/, 'must be a valid PostgreSQL schema name').default('ownagent'),
+  SUPABASE_DB_SCHEMA: z
+    .string()
+    .regex(/^[a-z_][a-z0-9_]*$/, 'must be a valid PostgreSQL schema name')
+    .default('ownagent'),
   DATABASE_URL: z.string().url().default('postgresql://postgres:postgres@127.0.0.1:54322/postgres'),
   AUTH_JWT_SECRET: z.string().min(32),
   AUTH_JWT_PREVIOUS_SECRET: z.string().min(32).optional(),
@@ -15,7 +18,10 @@ const schema = z.object({
   AUTH_JWT_AUDIENCE: z.string().default('ownagent-api'),
   AUTH_COOKIE_ACCESS_NAME: z.string().default('ownagent_access'),
   AUTH_COOKIE_REFRESH_NAME: z.string().default('ownagent_refresh'),
-  AUTH_COOKIE_SECURE: z.string().default('false').transform(value => value === 'true'),
+  AUTH_COOKIE_SECURE: z
+    .string()
+    .default('false')
+    .transform(value => value === 'true'),
   AUTH_COOKIE_SAMESITE: z.enum(['lax', 'strict', 'none']).default('lax'),
   ACCESS_TOKEN_TTL: duration.default('15m'),
   REFRESH_TOKEN_TTL: duration.default('30d'),
@@ -36,12 +42,18 @@ const schema = z.object({
   REDIS_CONSUMER_GROUP: z.string().default('ownagent-workers'),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().max(32).default(4),
   WORKER_MAX_ATTEMPTS: z.coerce.number().int().positive().max(20).default(5),
-  LANGFUSE_TRACING: z.string().default('true').transform(value => value !== 'false'),
+  LANGFUSE_TRACING: z
+    .string()
+    .default('true')
+    .transform(value => value !== 'false'),
   LANGFUSE_PUBLIC_KEY: z.string().optional(),
   LANGFUSE_SECRET_KEY: z.string().optional(),
   LANGFUSE_BASE_URL: z.string().url().default('http://127.0.0.1:3001'),
   LANGFUSE_PROJECT: z.string().default('ownagent'),
-  LANGFUSE_DEBUG_CONTENT: z.string().default('false').transform(value => value === 'true'),
+  LANGFUSE_DEBUG_CONTENT: z
+    .string()
+    .default('false')
+    .transform(value => value === 'true'),
   WS_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   WS_MAX_FRAME_BYTES: z.coerce.number().int().positive().max(2_000_000).default(256_000),
   WS_MAX_CONNECTIONS: z.coerce.number().int().positive().default(1_000),
@@ -52,14 +64,19 @@ export type AppConfig = z.infer<typeof schema>
 export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   const result = schema.safeParse(source)
   if (!result.success) {
-    const details = result.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')
+    const details = result.error.issues
+      .map(issue => `${issue.path.join('.')}: ${issue.message}`)
+      .join('; ')
     throw new Error(`Invalid environment configuration: ${details}`)
   }
   return result.data
 }
 
 export function splitOrigins(value: string): string[] {
-  return value.split(',').map(origin => origin.trim()).filter(Boolean)
+  return value
+    .split(',')
+    .map(origin => origin.trim())
+    .filter(Boolean)
 }
 
 export function durationToSeconds(value: string): number {

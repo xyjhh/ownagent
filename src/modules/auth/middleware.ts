@@ -10,7 +10,9 @@ export function requireAuth(auth: AuthService, config?: AppConfig) {
       const header = request.header('authorization')
       const token = header?.startsWith('Bearer ')
         ? header.slice('Bearer '.length).trim()
-        : (config ? accessCookie(request, config) : undefined)
+        : config
+          ? accessCookie(request, config)
+          : undefined
       if (!token) throw unauthorized()
       request.auth = await auth.authenticateAccessToken(token)
       next()
