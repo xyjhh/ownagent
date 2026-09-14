@@ -31,7 +31,10 @@ const runService = new RunService(runRepository, queue, {
   controlStream: config.REDIS_STREAM_CONTROLS,
   maxAttempts: config.WORKER_MAX_ATTEMPTS,
 })
-const outbox = new OutboxDispatcher(runRepository, queue, config.DATABASE_URL)
+const outbox = new OutboxDispatcher(runRepository, queue, config.DATABASE_URL, {
+  baseMs: config.REDIS_OUTBOX_RETRY_BASE_MS,
+  maxMs: config.REDIS_OUTBOX_RETRY_MAX_MS,
+})
 outbox.start()
 const tracer = new LangfuseTracer(config)
 const health = new HealthService(config, schemaDb, undefined, undefined, undefined, queue, tracer)

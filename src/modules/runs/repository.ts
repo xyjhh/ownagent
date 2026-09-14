@@ -278,10 +278,15 @@ export class RunRepository {
     const { error } = await query
     if (error) throw new Error(`Outbox update failed: ${error.message}`)
   }
-  async releaseOutbox(id: string, workerId: string, errorMessage: string) {
+  async releaseOutbox(id: string, workerId: string, errorMessage: string, delayMs = 0) {
     const { error } = await this.db
       .from('task_outbox')
-      .update({ processing_at: null, locked_by: null, last_error: errorMessage })
+      .update({
+        processing_at: null,
+        locked_by: null,
+        last_error: errorMessage,
+        available_at: new Date(Date.now() + Math.max(0, delayMs)).toISOString(),
+      })
       .eq('id', id)
       .eq('locked_by', workerId)
       .is('published_at', null)

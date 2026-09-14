@@ -22,7 +22,13 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command: >-
+      sh -c "exec redis-server --appendonly yes
+      --maxmemory \"$${REDIS_MAXMEMORY:-512mb}\"
+      --maxmemory-policy \"$${REDIS_MAXMEMORY_POLICY:-noeviction}\""
+    environment:
+      REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-512mb}
+      REDIS_MAXMEMORY_POLICY: ${REDIS_MAXMEMORY_POLICY:-noeviction}
     volumes:
       - ownagent-redis:/data
     healthcheck:

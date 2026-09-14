@@ -26,6 +26,8 @@ export class HealthService {
       this.reranker.health(),
       this.queue?.health() ?? Promise.resolve('unavailable' as const),
     ])
+    const redisMetrics = this.queue ? await this.redisMetrics() : undefined
+    const outboxMetrics = await this.outboxMetrics()
     const dependencies = {
       supabase,
       deepseek: (this.deepseek.isConfigured() ? 'configured' : 'unavailable') as DependencyStatus,
@@ -37,7 +39,53 @@ export class HealthService {
     return {
       status: supabase === 'ok' ? 'ok' : 'not_ready',
       dependencies,
+      ...(redisMetrics ? { redisMetrics } : {}),
+      ...(outboxMetrics ? { outboxMetrics } : {}),
       modelServicesAreNonBlocking: true,
+    }
+  }
+
+  private async redisMetrics() {
+    if (!this.queue) return undefined
+    try {
+      const [memory, agent, controls, deadLetter] = await Promise.all([
+        this.queue.memoryStats(),
+        this.queue.streamStats(this.config.REDIS_STREAM_AGENT, this.config.REDIS_CONSUMER_GROUP),
+        this.queue.streamStats(this.config.REDIS_STREAM_CONTROLS, this.config.REDIS_CONSUMER_GROUP),
+        this.queue.streamStats(this.config.REDIS_STREAM_DEAD_LETTER),
+      ])
+      return {
+        usedMemory: memory.usedMemory,
+        maxMemory: memory.maxMemory,
+        memoryUsageRatio: memory.usageRatio,
+        memoryPressure: pressureLevel(memory.usageRatio),
+        agentStreamLength: agent.length,
+        controlStreamLength: controls.length,
+        deadLetterStreamLength: deadLetter.length,
+        pendingCount: agent.pendingCount + controls.pendingCount,
+        oldestPendingIdleMs: Math.max(agent.oldestPendingIdleMs, controls.oldestPendingIdleMs),
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  private async outboxMetrics() {
+    try {
+      const { data, error, count } = await this.db
+        .from('task_outbox')
+        .select('id,created_at', { count: 'exact' })
+        .is('published_at', null)
+        .order('created_at', { ascending: true })
+        .limit(1)
+      if (error) return undefined
+      const oldest = data?.[0]?.created_at
+      return {
+        unpublishedCount: count ?? 0,
+        oldestAgeMs: oldest ? Math.max(0, Date.now() - Date.parse(String(oldest))) : 0,
+      }
+    } catch {
+      return undefined
     }
   }
 
@@ -49,4 +97,12 @@ export class HealthService {
       return 'unavailable'
     }
   }
+}
+
+function pressureLevel(ratio: number | null): 'unknown' | 'normal' | 'notice' | 'warning' | 'critical' {
+  if (ratio === null) return 'unknown'
+  if (ratio >= 0.95) return 'critical'
+  if (ratio >= 0.85) return 'warning'
+  if (ratio >= 0.7) return 'notice'
+  return 'normal'
 }

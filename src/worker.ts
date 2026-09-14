@@ -22,12 +22,45 @@ const expiryTimer = setInterval(() => {
   void Promise.resolve(schemaDb.rpc('expire_agent_run_approvals')).catch(() => undefined)
 }, 60_000)
 
+async function withPendingLease(
+  stream: string,
+  message: { id: string },
+  run: () => Promise<void>
+) {
+  const heartbeatMs = Math.max(10_000, Math.floor(config.REDIS_RECLAIM_IDLE_MS / 3))
+  const heartbeat = setInterval(() => {
+    void queue
+      .touch(stream, config.REDIS_CONSUMER_GROUP, consumer, message.id)
+      .catch(() => undefined)
+  }, heartbeatMs)
+  try {
+    await run()
+  } finally {
+    clearInterval(heartbeat)
+  }
+}
+
 async function emitEvent(runId: string, event: Record<string, unknown>) {
   try {
     await queue.publishEvent(runId, event)
   } catch {
     /* database remains source of truth */
   }
+}
+
+async function publishRunDeadLetter(runId: string, messageId: string) {
+  const run = await repository.getById(runId)
+  if (!run || run.status !== 'failed') return false
+  await queue.publishDeadLetter({
+    runId,
+    messageId,
+    workspaceId: run.workspaceId,
+    requestedBy: run.requestedBy,
+    status: run.status,
+    attempt: run.attempt,
+    errorCode: run.errorCode ?? 'AGENT_ERROR',
+  })
+  return true
 }
 
 async function processMessage(
@@ -144,7 +177,7 @@ async function processMessage(
     })
     trace?.update?.({ output: { status: 'completed' } })
   } catch (error) {
-    const messageText = error instanceof Error ? error.message : 'Agent run failed'
+    const messageText = error instanceof Error ? error.name : 'Agent run failed'
     abortControllers.delete(run.id)
     if (controller.signal.aborted) {
       const current = await repository.getById(run.id)
@@ -170,6 +203,15 @@ async function processMessage(
         sequence: event.sequence,
         code: 'AGENT_ERROR',
         workspaceId: run.workspaceId,
+      })
+      await queue.publishDeadLetter({
+        runId: run.id,
+        messageId: message.id,
+        workspaceId: run.workspaceId,
+        requestedBy: run.requestedBy,
+        status: 'failed',
+        attempt: next?.attempt ?? run.attempt + 1,
+        errorCode: 'AGENT_ERROR',
       })
     }
     trace?.update?.({ output: { status: 'failed', error: 'AGENT_ERROR' } })
@@ -211,11 +253,23 @@ async function agentLoop() {
     const reclaimed = await queue.reclaim(
       config.REDIS_STREAM_AGENT,
       config.REDIS_CONSUMER_GROUP,
-      consumer
+      consumer,
+      config.REDIS_RECLAIM_IDLE_MS
     )
     for (const message of reclaimed) {
-      await processMessage(message)
-      await queue.ack(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+      try {
+        await withPendingLease(config.REDIS_STREAM_AGENT, message, () => processMessage(message))
+        await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+      } catch {
+        // If DB state is already terminal but DLQ publishing failed, retry DLQ before acking.
+        try {
+          const payload = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
+          if (payload.runId && (await publishRunDeadLetter(payload.runId, message.id)))
+            await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+        } catch {
+          // Keep unhandled failures pending so another Worker can reclaim them.
+        }
+      }
     }
     const messages = await queue.read(
       config.REDIS_STREAM_AGENT,
@@ -225,25 +279,59 @@ async function agentLoop() {
       5000
     )
     for (const message of messages) {
-      await processMessage(message)
-      await queue.ack(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+      try {
+        await withPendingLease(config.REDIS_STREAM_AGENT, message, () => processMessage(message))
+        await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+      } catch {
+        try {
+          const payload = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
+          if (payload.runId && (await publishRunDeadLetter(payload.runId, message.id)))
+            await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+        } catch {
+          // Keep unhandled failures pending so another Worker can reclaim them.
+        }
+      }
     }
   }
 }
 async function controlLoop() {
   while (true) {
+    const controlConsumer = `${consumer}-controls`
+    const reclaimed = await queue.reclaim(
+      config.REDIS_STREAM_CONTROLS,
+      config.REDIS_CONSUMER_GROUP,
+      controlConsumer,
+      config.REDIS_RECLAIM_IDLE_MS
+    )
+    for (const message of reclaimed) {
+      try {
+        await withPendingLease(config.REDIS_STREAM_CONTROLS, message, () => processControl(message))
+        await queue.ackAndDelete(
+          config.REDIS_STREAM_CONTROLS,
+          config.REDIS_CONSUMER_GROUP,
+          message.id
+        )
+      } catch {
+        // Keep unhandled control failures pending for reclaim.
+      }
+    }
     const messages = await queue.read(
       config.REDIS_STREAM_CONTROLS,
       config.REDIS_CONSUMER_GROUP,
-      `${consumer}-controls`,
+      controlConsumer,
       config.WORKER_CONCURRENCY,
       5000
     )
     for (const message of messages) {
       try {
-        await processControl(message)
-      } finally {
-        await queue.ack(config.REDIS_STREAM_CONTROLS, config.REDIS_CONSUMER_GROUP, message.id)
+        await withPendingLease(config.REDIS_STREAM_CONTROLS, message, () => processControl(message))
+        await queue.ackAndDelete(
+          config.REDIS_STREAM_CONTROLS,
+          config.REDIS_CONSUMER_GROUP,
+          message.id
+        )
+      } catch {
+        // Keep unhandled control failures pending for reclaim.
       }
     }
   }
