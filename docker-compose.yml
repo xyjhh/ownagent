@@ -2,6 +2,9 @@ services:
   api:
     build: .
     env_file: .env
+    environment:
+      # Containers must use the Compose service name, not their own localhost.
+      REDIS_URL: redis://redis:6379
     ports:
       - "8787:8787"
     depends_on:
@@ -13,6 +16,8 @@ services:
     build: .
     command: ["node", "dist/src/worker.js"]
     env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
     depends_on:
       redis:
         condition: service_healthy
@@ -31,6 +36,9 @@ services:
       REDIS_MAXMEMORY_POLICY: ${REDIS_MAXMEMORY_POLICY:-noeviction}
     volumes:
       - ownagent-redis:/data
+    ports:
+      # Also allows npm run dev / npm run dev:worker on the host to use this Redis.
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

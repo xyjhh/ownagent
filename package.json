@@ -9,6 +9,9 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "dev:worker": "tsx watch src/worker.ts",
+    "models:start": "powershell -ExecutionPolicy Bypass -File scripts/start-models.ps1",
+    "models:stop": "powershell -ExecutionPolicy Bypass -File scripts/stop-models.ps1",
+    "models:status": "powershell -ExecutionPolicy Bypass -File scripts/model-status.ps1",
     "start": "node dist/server.js",
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",

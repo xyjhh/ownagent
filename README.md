@@ -30,6 +30,20 @@
 
 默认监听 `http://127.0.0.1:8787`。本机嵌入服务和重排服务分别沿用参考项目的 `8002`、`8001` 端口；它们未启动时不会阻塞认证服务。
 
+## 本地模型服务
+
+本项目提供统一的模型服务脚本。当前电脑上已有的 DirectML Embedding 服务和 Reranker Docker Compose 项目位于 `ownagent` 的同级参考项目中；脚本会复用它们已有的模型与依赖，不会重复下载模型。
+
+```powershell
+npm run models:start
+npm run models:status
+npm run models:stop
+```
+
+`models:start` 会启动本机 `Qwen3-Embedding-0.6B` ONNX/DirectML 服务（`127.0.0.1:8002`）及 Docker 中的 `Qwen3-Reranker-0.6B` 服务（`127.0.0.1:8001`），并等待两个 `/health` 端点可用。嵌入服务日志写入 `.runtime/embedding.out.log` 与 `.runtime/embedding.err.log`。`models:stop` 只停止服务，不会删除 Docker 中已经下载的重排模型卷。
+
+如服务目录移动，可设置 `OWNAGENT_EMBEDDING_SERVICE_DIR` 和 `OWNAGENT_RERANKER_SERVICE_DIR`，或把这两个值作为同名脚本参数传入。
+
 ## 认证接口
 
 ```text
@@ -72,6 +86,8 @@ npm run dev:worker
 前端可通过 `ws://127.0.0.1:8787/ws` 建立双向连接。登录或刷新响应会同时设置 HttpOnly Cookie；浏览器会自动在 WebSocket 握手时携带 Cookie。连接后发送 `subscribe`、`start_run`、`approve`、`reject`、`interrupt`、`follow_up` 消息即可接收实时状态、审批和 token 事件。断线重连时使用 `lastSequence`，服务端会先补发 `agent_run_events` 历史记录，再接收 Redis Pub/Sub 实时事件。
 
 多实例部署可使用 `docker compose up --build`。Redis Streams 使用 `ownagent:agent-runs`，Postgres `agent_runs` 是任务最终事实来源，`task_outbox` 负责在数据库提交后补发消息。
+
+Redis 由 OwnAgent 自己的 Compose 服务提供，数据保存在 `ownagent-redis` Docker volume。Compose 内的 API/Worker 使用 `redis://redis:6379`，本机执行 `npm run dev` 或 `npm run dev:worker` 时使用 `.env` 中的 `redis://127.0.0.1:6379`；Redis 同时发布到本机回环地址 `6379`。如果该端口被其他项目占用，请先停止占用它的容器，或统一修改端口映射和 `.env` 中的 `REDIS_URL`。
 
 Redis 任务 Stream 只作为短期传输层：Worker 成功处理后会原子执行 `XACK + XDEL`，因此不会因为已完成任务长期累积。`ownagent:dead-letter` 使用近似 `MAXLEN` 限制保留数量；Redis 默认启用 `maxmemory 512mb` 和 `noeviction`，达到上限时拒绝新写入，任务会继续留在 Postgres Outbox，不会静默丢失。Redis 内存、Stream 长度、Pending 和 Outbox 积压可通过 `/health/ready` 查看。
 

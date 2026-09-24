@@ -154,7 +154,8 @@ export class RedisStreams {
     stream: string,
     group: string,
     consumer: string,
-    minIdleMs = 60_000
+    minIdleMs = 60_000,
+    count = 1
   ): Promise<StreamMessage[]> {
     await this.connect()
     const result = (await (this.client as any).xautoclaim(
@@ -164,7 +165,7 @@ export class RedisStreams {
       minIdleMs,
       '0-0',
       'COUNT',
-      20
+      Math.max(1, count)
     )) as [string, Array<[string, string[]]>]
     return (
       result?.[1]?.map(([id, values]) => ({

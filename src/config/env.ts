@@ -47,6 +47,7 @@ const schema = z.object({
   REDIS_STREAM_CONTROLS: z.string().default('ownagent:agent-controls'),
   REDIS_CONSUMER_GROUP: z.string().default('ownagent-workers'),
   WORKER_CONCURRENCY: z.coerce.number().int().positive().max(32).default(4),
+  CONTROL_CONCURRENCY: z.coerce.number().int().positive().max(32).default(2),
   WORKER_MAX_ATTEMPTS: z.coerce.number().int().positive().max(20).default(5),
   LANGFUSE_TRACING: z
     .string()
