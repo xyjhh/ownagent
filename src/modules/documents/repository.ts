@@ -72,7 +72,7 @@ export class DocumentRepository {
   }
 
   async get(context: DocumentContext, documentId: string) {
-    const { data, error } = await this.db.from('knowledge_documents').select('*').eq('id', documentId).eq('workspace_id', context.workspaceId).maybeSingle()
+    const { data, error } = await this.db.from('knowledge_documents').select('*').eq('id', documentId).eq('workspace_id', context.workspaceId).neq('status', 'deleted').maybeSingle()
     if (error) throw new Error(`Document lookup failed: ${error.message}`)
     if (data && data.visibility === 'private' && data.owner_id !== context.userId) {
       const { data: member, error: memberError } = await this.db.from('knowledge_document_members').select('document_id').eq('document_id', documentId).eq('user_id', context.userId).maybeSingle()
@@ -186,11 +186,25 @@ export class DocumentRepository {
       .from('knowledge_documents')
       .select('id,title,content,visibility,metadata,created_at')
       .eq('workspace_id', context.workspaceId)
+      .neq('status', 'deleted')
       .or(`visibility.eq.workspace,owner_id.eq.${context.userId}`)
       .order('created_at', { ascending: false })
       .limit(Math.min(limit, 100))
     if (error) throw new Error(`Document listing failed: ${error.message}`)
     return data ?? []
+  }
+
+  async delete(context: DocumentContext, documentId: string) {
+    const { data, error } = await this.db
+      .from('knowledge_documents')
+      .delete()
+      .eq('id', documentId)
+      .eq('workspace_id', context.workspaceId)
+      .neq('status', 'deleted')
+      .select('id')
+      .maybeSingle()
+    if (error) throw new Error(`Document deletion failed: ${error.message}`)
+    return Boolean(data)
   }
 
   async search(

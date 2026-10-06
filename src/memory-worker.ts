@@ -5,6 +5,7 @@ import { createSupabaseAdmin, createSupabaseSchemaClient } from './infrastructur
 import { RedisStreams, type StreamMessage } from './queue/redis-streams.js'
 import { MemoryRepository, type MemoryTask } from './modules/memory/repository.js'
 import { ConversationRepository } from './modules/conversations/repository.js'
+import { fallbackConversationTitle, normalizeConversationTitle, titlePrompt } from './modules/conversations/title.js'
 import { DeepSeekClient } from './integrations/deepseek.js'
 import { EmbeddingClient } from './integrations/embedding.js'
 import { z } from 'zod'
@@ -27,6 +28,7 @@ const active = new Set<Promise<void>>()
 let stopping = false
 
 const summarySchema = z.object({ summary: z.string().max(12000) })
+const titleSchema = z.object({ title: z.string().max(120) })
 const reviewSchema = z.object({ approved: z.boolean(), confidence: z.number().min(0).max(1), reason: z.string().max(500).optional() })
 const consolidationSchema = z.object({ merged: z.array(z.object({ key: z.string().min(1).max(100), type: z.enum(['preference', 'fact', 'instruction']), value: z.record(z.string(), z.unknown()), summary: z.string().max(500), confidence: z.number().min(0).max(1) })).max(100) })
 async function lease(message: StreamMessage, fn: () => Promise<void>) {
@@ -58,6 +60,27 @@ async function execute(task: MemoryTask) {
     if (!model.isConfigured()) throw new Error('MODEL_UNAVAILABLE')
     const result = await model.chatJson([{ role: 'system', content: '请只根据对话生成简洁事实摘要，输出 JSON：{"summary":"..."}，不要添加对话外信息。' }, { role: 'user', content: JSON.stringify(messages.map(m => ({ role: m.role, content: m.content }))) }], summarySchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1 })
     await memories.upsertSummary(task.conversationId, result.summary, messages.at(-1)?.id, config.DEEPSEEK_MODEL)
+    return
+  }
+  if (task.taskType === 'update_conversation_title') {
+    if (!task.conversationId) throw new Error('CONVERSATION_REQUIRED')
+    const messages = await conversations.recent(task.conversationId, 50)
+    if (!messages.length) return
+    const expectedLastMessageId = typeof payload.lastMessageId === 'string' ? payload.lastMessageId : messages.at(-1)?.id
+    const fallback = fallbackConversationTitle(messages)
+    let title = fallback
+    if (model.isConfigured()) {
+      try {
+        const result = await model.chatJson([
+          { role: 'system', content: '你是会话标题生成器。只根据给定对话输出 JSON，格式必须是 {"title":"..."}。标题要简洁、具体、可扫描，长度约 6-18 个汉字或等价英文长度，跟随对话主要语言，不要添加引号、Markdown、前缀、句号或解释。' },
+          { role: 'user', content: titlePrompt(messages) },
+        ], titleSchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1 })
+        title = normalizeConversationTitle(result.title, fallback)
+      } catch {
+        title = fallback
+      }
+    }
+    await conversations.updateTitleIfLatest(task.conversationId, title, expectedLastMessageId)
     return
   }
   if (task.taskType === 'expire_memories') { await memories.expire(); return }

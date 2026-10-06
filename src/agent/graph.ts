@@ -285,15 +285,16 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     } catch { return { memoryCandidates: [], requiresMemoryConfirmation: false } }
   })
   graph.addNode('persist_response', async (state: KnowledgeAgentState) => {
+    let assistantMessageId: string | undefined
     if (deps.conversations && state.conversationId && state.answer)
-      await deps.conversations.append({
+      assistantMessageId = (await deps.conversations.append({
         conversationId: state.conversationId,
         workspaceId: state.workspaceId,
         userId: state.userId,
         role: 'assistant',
         content: state.answer,
         citations: state.citations ?? [],
-      })
+      })).id
     for (const candidate of state.memoryCandidates ?? []) {
       if (deps.memories?.enqueueTask) {
         try {
@@ -306,6 +307,11 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       }
     }
     if (deps.memories?.enqueueTask && state.conversationId) {
+      try {
+        await deps.memories.enqueueTask({ workspaceId: state.workspaceId, userId: state.userId, conversationId: state.conversationId, runId: state.runId, taskType: 'update_conversation_title', payload: { conversationId: state.conversationId, lastMessageId: assistantMessageId } })
+      } catch {
+        // Title generation is asynchronous and must not affect the completed answer.
+      }
       try {
         await deps.memories.enqueueTask({ workspaceId: state.workspaceId, userId: state.userId, conversationId: state.conversationId, runId: state.runId, taskType: 'summarize_conversation', payload: { conversationId: state.conversationId } })
       } catch {

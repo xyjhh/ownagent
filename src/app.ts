@@ -31,6 +31,7 @@ export type AppDependencies = {
   workspaceRepository: WorkspaceRepository
   runService: RunService
   schemaDb: SupabaseClient
+  storageDb?: SupabaseClient
   embedding: EmbeddingClient
   reranker: RerankerClient
   queue?: RedisStreams
@@ -102,7 +103,8 @@ export function createApp(deps: AppDependencies): Express {
       deps.schemaDb,
       deps.embedding,
       deps.reranker,
-      deps.config
+      deps.config,
+      deps.storageDb ?? deps.schemaDb
     )
   )
   app.use(

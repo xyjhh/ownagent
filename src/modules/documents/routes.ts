@@ -19,7 +19,8 @@ export function createDocumentRouter(
   db: any,
   embedding: EmbeddingClient,
   reranker: RerankerClient,
-  config?: AppConfig
+  config?: AppConfig,
+  storageDb: any = db
 ): Router {
   const router = Router()
   const repository = new DocumentRepository(db)
@@ -121,9 +122,23 @@ export function createDocumentRouter(
     try {
       const document = await repository.get(request.workspace!, String(request.params.documentId))
       if (!document || document.status !== 'ready' || !document.storage_bucket || !document.storage_key) return response.status(404).json({ error: 'DOCUMENT_NOT_READY' })
-      const signed = await db.storage.from(document.storage_bucket).createSignedUrl(document.storage_key, config?.DOCUMENT_DOWNLOAD_URL_EXPIRES_SECONDS ?? 600)
+      const signed = await storageDb.storage.from(document.storage_bucket).createSignedUrl(document.storage_key, config?.DOCUMENT_DOWNLOAD_URL_EXPIRES_SECONDS ?? 600)
       if (signed.error || !signed.data?.signedUrl) throw new Error(`DOWNLOAD_URL_FAILED:${signed.error?.message ?? 'unknown'}`)
       response.json({ url: signed.data.signedUrl, fileName: document.original_filename ?? document.title, size: document.file_size, etag: document.content_hash, expiresIn: config?.DOCUMENT_DOWNLOAD_URL_EXPIRES_SECONDS ?? 600 })
+    } catch (error) { next(error) }
+  })
+  router.delete('/:workspaceId/documents/:documentId', requireWorkspaceAccess(auth, workspaceRepository, ['owner', 'admin', 'editor'], config), async (request, response, next) => {
+    try {
+      const documentId = String(request.params.documentId)
+      const document = await repository.get(request.workspace!, documentId)
+      if (!document) return response.status(404).json({ error: 'DOCUMENT_NOT_FOUND' })
+      if (document.storage_bucket && document.storage_key) {
+        const removed = await storageDb.storage.from(document.storage_bucket).remove([document.storage_key])
+        if (removed.error) throw new Error(`DOCUMENT_STORAGE_DELETE_FAILED:${removed.error.message}`)
+      }
+      const deleted = await repository.delete(request.workspace!, documentId)
+      if (!deleted) return response.status(404).json({ error: 'DOCUMENT_NOT_FOUND' })
+      response.status(204).end()
     } catch (error) { next(error) }
   })
   router.post('/:workspaceId/documents/upload', requireWorkspaceAccess(auth, workspaceRepository, ['owner', 'admin', 'editor'], config), upload.single('file'), async (request, response, next) => {
@@ -137,7 +152,7 @@ export function createDocumentRouter(
       const hash = createHash('sha256').update(file.buffer).digest('hex')
       const bucket = 'knowledge-documents'
       const key = `${request.workspace!.workspaceId}/${hash}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`
-      const storage = db.storage.from(bucket)
+      const storage = storageDb.storage.from(bucket)
       const stored = await storage.upload(key, file.buffer, { contentType: file.mimetype, upsert: false })
       if (stored.error && !/already exists/i.test(stored.error.message)) throw new Error(`file storage failed: ${stored.error.message}`)
       const document = await repository.createUpload(request.workspace!, { title, visibility, storageBucket: bucket, storageKey: key, originalFilename: file.originalname, mimeType: file.mimetype, fileSize: file.size, contentHash: hash, ingestStream: config?.REDIS_STREAM_DOCUMENT_INGEST ?? 'ownagent:document-ingest' })

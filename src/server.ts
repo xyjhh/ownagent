@@ -45,6 +45,7 @@ const app = createApp({
   workspaceRepository,
   runService,
   schemaDb,
+  storageDb: db,
   embedding,
   reranker,
   queue,

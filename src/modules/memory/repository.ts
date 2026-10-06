@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { randomUUID } from 'node:crypto'
 
-export type MemoryTaskType = 'persist_candidate' | 'review_candidate' | 'summarize_conversation' | 'consolidate_memories' | 'embed_memory' | 'expire_memories'
+export type MemoryTaskType = 'persist_candidate' | 'review_candidate' | 'summarize_conversation' | 'update_conversation_title' | 'consolidate_memories' | 'embed_memory' | 'expire_memories'
 export type MemoryTask = { id: string; taskType: MemoryTaskType; workspaceId: string; userId?: string; conversationId?: string; runId?: string; memoryItemId?: string; payload: Record<string, unknown>; attempt: number; status: string }
 
 export type MemoryItem = { id: string; workspaceId: string; ownerUserId?: string; scope: 'user' | 'workspace'; type: 'preference' | 'fact' | 'instruction'; key: string; value: Record<string, unknown>; summary: string; confidence: number; status: string; sensitivity: 'normal' | 'sensitive' }
