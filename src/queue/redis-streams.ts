@@ -47,9 +47,13 @@ export class RedisStreams {
   }
 
   async publishDeadLetter(payload: Record<string, unknown>) {
+    return this.publishToStream(this.config.REDIS_STREAM_DEAD_LETTER, payload)
+  }
+
+  async publishToStream(stream: string, payload: Record<string, unknown>) {
     await this.connect()
     return this.client.xadd(
-      this.config.REDIS_STREAM_DEAD_LETTER,
+      stream,
       'MAXLEN',
       '~',
       this.config.REDIS_DEAD_LETTER_MAXLEN,

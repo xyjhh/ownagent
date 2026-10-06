@@ -48,11 +48,12 @@ export class HealthService {
   private async redisMetrics() {
     if (!this.queue) return undefined
     try {
-      const [memory, agent, controls, deadLetter] = await Promise.all([
+      const [memory, agent, controls, deadLetter, memoryTasks] = await Promise.all([
         this.queue.memoryStats(),
         this.queue.streamStats(this.config.REDIS_STREAM_AGENT, this.config.REDIS_CONSUMER_GROUP),
         this.queue.streamStats(this.config.REDIS_STREAM_CONTROLS, this.config.REDIS_CONSUMER_GROUP),
         this.queue.streamStats(this.config.REDIS_STREAM_DEAD_LETTER),
+        this.queue.streamStats(this.config.REDIS_STREAM_MEMORY ?? 'ownagent:memory-tasks', this.config.REDIS_CONSUMER_GROUP),
       ])
       return {
         usedMemory: memory.usedMemory,
@@ -62,6 +63,9 @@ export class HealthService {
         agentStreamLength: agent.length,
         controlStreamLength: controls.length,
         deadLetterStreamLength: deadLetter.length,
+        memoryStreamLength: memoryTasks.length,
+        memoryPendingCount: memoryTasks.pendingCount,
+        memoryOldestPendingIdleMs: memoryTasks.oldestPendingIdleMs,
         pendingCount: agent.pendingCount + controls.pendingCount,
         oldestPendingIdleMs: Math.max(agent.oldestPendingIdleMs, controls.oldestPendingIdleMs),
       }

@@ -5,6 +5,12 @@ services:
     environment:
       # Containers must use the Compose service name, not their own localhost.
       REDIS_URL: redis://redis:6379
+      SUPABASE_URL: http://host.docker.internal:54321
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
+      RERANK_URL: http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8787:8787"
     depends_on:
@@ -18,12 +24,52 @@ services:
     env_file: .env
     environment:
       REDIS_URL: redis://redis:6379
+      SUPABASE_URL: http://host.docker.internal:54321
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
+      RERANK_URL: http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
     deploy:
       replicas: 2
+
+  document-worker:
+    build: .
+    command: ["node", "dist/src/document-worker.js"]
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      SUPABASE_URL: http://host.docker.internal:54321
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
+      RERANK_URL: http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  memory-worker:
+    build: .
+    command: ["node", "dist/src/memory-worker.js"]
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      SUPABASE_URL: http://host.docker.internal:54321
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
+      RERANK_URL: http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine

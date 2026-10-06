@@ -21,6 +21,8 @@ import { createRunRouter } from './modules/runs/routes.js'
 import type { RunService } from './modules/runs/service.js'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { RedisStreams } from './queue/redis-streams.js'
+import { createMemoryRouter } from './modules/memory/routes.js'
+import { createConversationRouter } from './modules/conversations/routes.js'
 
 export type AppDependencies = {
   config: AppConfig
@@ -82,6 +84,8 @@ export function createApp(deps: AppDependencies): Express {
   app.use('/api/auth/login', authLimiter)
   app.use('/api/auth/refresh', authLimiter)
   app.use('/api/auth', createAuthRouter(deps.auth, deps.config))
+  app.use('/api/memories', createMemoryRouter(deps.auth, deps.schemaDb, deps.config))
+  app.use('/api/workspaces', createConversationRouter(deps.auth, deps.workspaceRepository, deps.schemaDb, deps.config))
   app.use(
     '/api/workspaces',
     createWorkspaceRouter(deps.auth, deps.workspaceRepository, deps.config)

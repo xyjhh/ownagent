@@ -87,6 +87,54 @@ npm run dev:worker
 
 多实例部署可使用 `docker compose up --build`。Redis Streams 使用 `ownagent:agent-runs`，Postgres `agent_runs` 是任务最终事实来源，`task_outbox` 负责在数据库提交后补发消息。
 
+### 一键启动全部服务
+
+确认数据库迁移已经执行到 `009_memory_worker.sql`，并且 `.env` 已填写后，在 PowerShell 中执行：
+
+```powershell
+npm run start:all
+```
+
+该命令会启动 Redis，并在本机启动 API、Agent Worker、Document Worker、Memory Worker，不依赖拉取 Node Docker 镜像。日志写入 `.runtime/*.log`。这是开发机推荐方式。
+
+如果 Docker 可以访问 Docker Hub，并希望全部服务运行在容器中：
+
+```powershell
+npm run start:all:docker
+```
+
+后续不改 Docker 镜像时可使用：
+
+```powershell
+npm run start:all:docker
+```
+
+停止本机启动的 API、Agent Worker、Document Worker、Memory Worker 和 Redis：
+
+```powershell
+npm run stop:all
+```
+
+停止 Docker Compose 中的全部 OwnAgent 服务：
+
+```powershell
+npm run stop:all:docker
+```
+
+需要同时启动本机 Embedding/Reranker 服务时执行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-all.ps1 -Build -Models
+```
+
+查看运行日志：
+
+```powershell
+docker compose logs -f api worker document-worker memory-worker
+```
+
+启动脚本不会自动执行 Supabase migration，避免误修改目标数据库。首次使用或升级时，请先按 migration 顺序执行新增脚本。
+
 Redis 由 OwnAgent 自己的 Compose 服务提供，数据保存在 `ownagent-redis` Docker volume。Compose 内的 API/Worker 使用 `redis://redis:6379`，本机执行 `npm run dev` 或 `npm run dev:worker` 时使用 `.env` 中的 `redis://127.0.0.1:6379`；Redis 同时发布到本机回环地址 `6379`。如果该端口被其他项目占用，请先停止占用它的容器，或统一修改端口映射和 `.env` 中的 `REDIS_URL`。
 
 Redis 任务 Stream 只作为短期传输层：Worker 成功处理后会原子执行 `XACK + XDEL`，因此不会因为已完成任务长期累积。`ownagent:dead-letter` 使用近似 `MAXLEN` 限制保留数量；Redis 默认启用 `maxmemory 512mb` 和 `noeviction`，达到上限时拒绝新写入，任务会继续留在 Postgres Outbox，不会静默丢失。Redis 内存、Stream 长度、Pending 和 Outbox 积压可通过 `/health/ready` 查看。

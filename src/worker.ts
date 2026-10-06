@@ -1,66 +1,80 @@
 import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
+import { Command } from '@langchain/langgraph'
 import { loadConfig } from './config/env.js'
 import { createSupabaseAdmin, createSupabaseSchemaClient } from './infrastructure/supabase.js'
-import { RedisStreams } from './queue/redis-streams.js'
+import { RedisStreams, type StreamMessage } from './queue/redis-streams.js'
 import { RunRepository } from './modules/runs/repository.js'
 import { createKnowledgeAgentGraph } from './agent/graph.js'
 import { createPostgresCheckpointer } from './agent/checkpointer.js'
 import { LangfuseTracer } from './observability/langfuse.js'
-import { Command } from '@langchain/langgraph'
-import type { AgentEvent, AgentEventType } from './modules/runs/events.js'
+import type { AgentEvent, AgentEventType, AgentMessageResult } from './modules/runs/events.js'
+import { workerMetric, workerMetricsSnapshot } from './worker-metrics.js'
+import { waitForTasks } from './worker-runtime.js'
+import { ConversationRepository } from './modules/conversations/repository.js'
+import { MemoryRepository } from './modules/memory/repository.js'
+import { DocumentRepository } from './modules/documents/repository.js'
+import { RetrievalAgent } from './agent/tools/knowledge.js'
+import { EmbeddingClient } from './integrations/embedding.js'
+import { RerankerClient } from './integrations/reranker.js'
+import { DeepSeekClient } from './integrations/deepseek.js'
+import { SupervisorAgent } from './agent/supervisor.js'
+import { DocumentTools } from './agent/tools/documents.js'
 
 const config = loadConfig()
-const schemaDb = createSupabaseSchemaClient(createSupabaseAdmin(config), config.SUPABASE_DB_SCHEMA)
-const repository = new RunRepository(schemaDb)
+const db = createSupabaseSchemaClient(createSupabaseAdmin(config), config.SUPABASE_DB_SCHEMA)
+const repository = new RunRepository(db)
 const queue = new RedisStreams(config)
+const conversations = new ConversationRepository(db)
+const memories = new MemoryRepository(db)
+const documents = new DocumentRepository(db)
+const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config), new RerankerClient(config))
+const model = new DeepSeekClient(config)
+const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, documents, documentTools: new DocumentTools(documents), model, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
 const tracer = new LangfuseTracer(config)
-const checkpointer = await createPostgresCheckpointer(config)
-const graph = createKnowledgeAgentGraph(checkpointer)
 const consumer = `${process.env.HOSTNAME ?? 'worker'}-${randomUUID()}`
-const abortControllers = new Map<string, AbortController>()
+const controllers = new Map<string, AbortController>()
 const expiryTimer = setInterval(() => {
-  void Promise.resolve(schemaDb.rpc('expire_agent_run_approvals')).catch(() => undefined)
+  void Promise.resolve(db.rpc('expire_agent_run_approvals')).catch(() => undefined)
 }, 60_000)
 
-async function withPendingLease(
+async function lease(
   stream: string,
-  message: { id: string },
-  run: () => Promise<void>,
+  message: StreamMessage,
+  fn: () => Promise<void>,
   leaseConsumer = consumer
 ) {
-  const heartbeatMs = Math.max(10_000, Math.floor(config.REDIS_RECLAIM_IDLE_MS / 3))
-  const heartbeat = setInterval(() => {
-    void queue
-      .touch(stream, config.REDIS_CONSUMER_GROUP, leaseConsumer, message.id)
-      .catch(() => undefined)
-  }, heartbeatMs)
+  const timer = setInterval(
+    () => {
+      void queue
+        .touch(stream, config.REDIS_CONSUMER_GROUP, leaseConsumer, message.id)
+        .catch(() => undefined)
+    },
+    Math.max(10_000, Math.floor(config.REDIS_RECLAIM_IDLE_MS / 3))
+  )
   try {
-    await run()
+    await fn()
   } finally {
-    clearInterval(heartbeat)
+    clearInterval(timer)
   }
 }
-
-async function emitEvent(runId: string, event: AgentEvent) {
+async function emit(runId: string, event: AgentEvent) {
   try {
     await queue.publishEvent(runId, event)
   } catch {
-    /* database remains source of truth */
+    workerMetric('eventPublishFailures')
   }
 }
-
-async function persistAndEmit(
+async function event(
   runId: string,
   workspaceId: string,
   type: AgentEventType,
   payload: Record<string, unknown>
 ) {
   const stored = await repository.appendEvent(runId, type, payload)
-  await emitEvent(runId, { type, runId, sequence: stored.sequence, workspaceId, ...payload })
+  await emit(runId, { type, runId, workspaceId, sequence: stored.sequence, ...payload })
 }
-
-async function publishRunDeadLetter(runId: string, messageId: string) {
+async function deadLetter(runId: string, messageId: string) {
   const run = await repository.getById(runId)
   if (!run || run.status !== 'failed') return false
   await queue.publishDeadLetter({
@@ -72,19 +86,24 @@ async function publishRunDeadLetter(runId: string, messageId: string) {
     attempt: run.attempt,
     errorCode: run.errorCode ?? 'AGENT_ERROR',
   })
+  workerMetric('deadLetterWrites')
   return true
 }
 
 async function processMessage(
-  message: { id: string; values: Record<string, string> },
+  message: StreamMessage,
   resumeValue?: unknown,
   resumeMode?: string,
   initialInput?: string
-) {
+): Promise<AgentMessageResult> {
   const payload = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
-  if (!payload.runId) return
+  if (!payload.runId) return 'skipped'
   const run = await repository.getById(payload.runId)
-  if (!run || !(await repository.markRunning(run.id))) return
+  if (!run || !(await repository.markRunning(run.id))) return 'skipped'
+  const started = Date.now()
+  workerMetric('agentsStarted')
+  const controller = new AbortController()
+  controllers.set(run.id, controller)
   const trace = tracer.startTrace({
     id: run.id,
     name: 'knowledge-agent-run',
@@ -93,12 +112,16 @@ async function processMessage(
     model: config.DEEPSEEK_MODEL,
     promptVersion: 'v1',
   })
-  const controller = new AbortController()
   try {
-    await persistAndEmit(run.id, run.workspaceId, 'started', { attempt: run.attempt + 1, sessionId: run.threadId })
-    abortControllers.set(run.id, controller)
-    const input = resumeValue === undefined ||
-        (resumeMode !== 'waiting_user' && resumeMode !== 'waiting_approval')
+    if (resumeValue === undefined && run.input.conversationId && typeof run.input.question === 'string') {
+      await conversations.append({ conversationId: String(run.input.conversationId), workspaceId: run.workspaceId, userId: run.requestedBy, role: 'user', content: run.input.question })
+    }
+    await event(run.id, run.workspaceId, 'started', {
+      attempt: run.attempt + 1,
+      sessionId: run.threadId,
+    })
+    const input =
+      resumeValue === undefined || !['waiting_user', 'waiting_approval'].includes(resumeMode ?? '')
         ? {
             userId: run.requestedBy,
             workspaceId: run.workspaceId,
@@ -108,81 +131,113 @@ async function processMessage(
           }
         : new Command({ resume: resumeValue })
     let output: string | undefined
-    let interruptValue: Record<string, unknown> | undefined
-    const stream = graph.stream(input, {
-      configurable: {
-        thread_id: run.threadId,
-        userId: run.requestedBy,
-        workspaceId: run.workspaceId,
-        runId: run.id,
+    let interrupt: Record<string, unknown> | undefined
+    const stream = graph.stream(
+      input,
+      {
+        configurable: {
+          thread_id: run.threadId,
+          userId: run.requestedBy,
+          workspaceId: run.workspaceId,
+          runId: run.id,
+        },
+        signal: controller.signal,
       },
-      signal: controller.signal,
-    }, { streamMode: 'updates' })
+      { streamMode: 'updates' }
+    )
     for await (const chunk of stream) {
       if (!chunk || typeof chunk !== 'object') continue
-      const interrupt = (chunk as any).__interrupt__?.[0]
-      if (interrupt) {
-        interruptValue = interrupt.value as Record<string, unknown>
+      const signal = (chunk as any).__interrupt__?.[0]
+      if (signal) {
+        interrupt = signal.value as Record<string, unknown>
         break
       }
       for (const [node, update] of Object.entries(chunk as Record<string, unknown>)) {
-        await persistAndEmit(run.id, run.workspaceId, 'node_started', { node })
+        const nodeStarted = Date.now()
+        await event(run.id, run.workspaceId, 'node_started', { node })
         const state = update as Record<string, unknown> | undefined
-        if (typeof state?.output === 'string') {
-          output = state.output
-          await persistAndEmit(run.id, run.workspaceId, 'token', { delta: state.output, node })
+        if (node === 'supervisor_plan' && state?.supervisorDecision) {
+          const decision = state.supervisorDecision as Record<string, unknown>
+          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true })
+          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true })
+          workerMetric('supervisorCalls')
+          if (state.supervisorFallback === true) workerMetric('supervisorFallbacks')
+          if (Number(decision.confidence) === 0) workerMetric('supervisorLowConfidence')
         }
-        await persistAndEmit(run.id, run.workspaceId, 'node_completed', { node })
+        if (node === 'validate_plan' && state?.planRejected) { await event(run.id, run.workspaceId, 'plan_rejected', { reason: 'PLAN_VALIDATION_FAILED' }); workerMetric('planRejections') }
+        if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_started', {})
+        if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_completed', { evidenceCount: Array.isArray(state?.evidence) ? state.evidence.length : 0 })
+        if (node === 'summarize_document' && state?.summary) await event(run.id, run.workspaceId, 'summary_completed', { citationCount: Array.isArray((state.summary as any).citations) ? (state.summary as any).citations.length : 0 })
+        if (node === 'compare_documents' && state?.comparison) await event(run.id, run.workspaceId, 'comparison_completed', { topicCount: Array.isArray((state.comparison as any).topics) ? (state.comparison as any).topics.length : 0 })
+        if (node === 'persist_response' && Array.isArray(state?.citations)) {
+          for (const citation of state.citations) await event(run.id, run.workspaceId, 'citation', { citation })
+        }
+        if (node === 'extract_memory_candidates' && Array.isArray(state?.memoryCandidates)) {
+          for (const candidate of state.memoryCandidates) await event(run.id, run.workspaceId, 'memory_candidate', { summary: (candidate as any).summary, sensitivity: (candidate as any).sensitivity })
+        }
+        const delta =
+          typeof state?.output === 'string'
+            ? state.output
+            : typeof state?.content === 'string'
+              ? state.content
+              : undefined
+        if (delta) {
+          output = delta
+          await event(run.id, run.workspaceId, 'token', { node, delta })
+        }
+        await event(run.id, run.workspaceId, 'node_completed', { node })
+        workerMetric('graphNodeDurationMs', Date.now() - nodeStarted)
       }
     }
-    abortControllers.delete(run.id)
-    if (interruptValue) {
-      await persistAndEmit(run.id, run.workspaceId, 'interrupt', { interrupt: interruptValue })
-      if (interruptValue.kind === 'approval') {
+    if (interrupt) {
+      await event(run.id, run.workspaceId, 'interrupt', { interrupt })
+      if (interrupt.kind === 'approval') {
         await repository.markWaitingApproval(run.id)
         await repository.createApproval(
           { userId: run.requestedBy, workspaceId: run.workspaceId, role: 'owner' },
           run.id,
-          String(interruptValue.approvalId ?? randomUUID()),
-          String(interruptValue.prompt ?? 'Approval required'),
-          Array.isArray(interruptValue.options) ? interruptValue.options : []
+          String(interrupt.approvalId ?? randomUUID()),
+          String(interrupt.prompt ?? 'Approval required'),
+          Array.isArray(interrupt.options) ? interrupt.options : []
         )
-      } else {
-        await repository.markWaitingUser(run.id)
-      }
-      return
+      } else await repository.markWaitingUser(run.id)
+      workerMetric('agentsInterrupted')
+      return 'waiting'
     }
     await repository.markCompleted(run.id)
-    await persistAndEmit(run.id, run.workspaceId, 'completed', { output: output ?? null })
+    await event(run.id, run.workspaceId, 'completed', { output: output ?? null })
     trace?.update?.({ output: { status: 'completed' } })
+    workerMetric('agentsCompleted')
+    return 'completed'
   } catch (error) {
-    const messageText = error instanceof Error ? error.message : 'Agent run failed'
-    abortControllers.delete(run.id)
     if (controller.signal.aborted) {
       await repository.markInterrupted(run.id)
-      await persistAndEmit(run.id, run.workspaceId, 'interrupt', { reason: 'user_cancelled' })
-      return
+      await event(run.id, run.workspaceId, 'interrupt', { reason: 'user_cancelled' })
+      workerMetric('agentsInterrupted')
+      return 'interrupted'
     }
-    const next = await repository.markFailed(run.id, 'AGENT_ERROR', messageText, true)
-    if (next?.status === 'queued')
+    const next = await repository.markFailed(
+      run.id,
+      'AGENT_ERROR',
+      error instanceof Error ? error.message : 'Agent run failed',
+      true
+    )
+    if (next?.status === 'queued') {
       await repository.enqueueRetry(run.id, 2 ** Math.max(0, next.attempt - 1) * 1000)
-    else {
-      await persistAndEmit(run.id, run.workspaceId, 'failed', { code: 'AGENT_ERROR' })
-      await queue.publishDeadLetter({
-        runId: run.id,
-        messageId: message.id,
-        workspaceId: run.workspaceId,
-        requestedBy: run.requestedBy,
-        status: 'failed',
-        attempt: next?.attempt ?? run.attempt + 1,
-        errorCode: 'AGENT_ERROR',
-      })
+      workerMetric('agentsRetried')
+      return 'retryable'
     }
-    trace?.update?.({ output: { status: 'failed', error: 'AGENT_ERROR' } })
+    await event(run.id, run.workspaceId, 'failed', { code: 'AGENT_ERROR' })
+    await deadLetter(run.id, message.id)
+    workerMetric('agentsFailed')
+    return 'dead_lettered'
+  } finally {
+    controllers.delete(run.id)
+    workerMetric('totalAgentDurationMs', Date.now() - started)
   }
 }
 
-async function processControl(message: { id: string; values: Record<string, string> }) {
+async function processControl(message: StreamMessage): Promise<AgentMessageResult> {
   const payload = JSON.parse(message.values.payload ?? '{}') as {
     runId?: string
     controlId?: string
@@ -191,176 +246,143 @@ async function processControl(message: { id: string; values: Record<string, stri
     question?: string
     resumeMode?: string
   }
-  if (!payload.runId) return
+  if (!payload.runId) return 'skipped'
   if (payload.controlType === 'interrupt') {
-    abortControllers.get(payload.runId)?.abort()
+    controllers.get(payload.runId)?.abort()
     await repository.markInterrupted(payload.runId)
     if (payload.controlId) await repository.markControlProcessed(payload.runId, payload.controlId)
-    return
+    return 'interrupted'
   }
   const run = await repository.getById(payload.runId)
-  if (!run || run.status !== 'queued') return
-  await processMessage(
+  if (!run || run.status !== 'queued') return 'skipped'
+  const result = await processMessage(
     { id: message.id, values: { payload: JSON.stringify({ runId: run.id }) } },
     payload.controlType === 'follow_up' ? payload.question : payload.value,
     payload.resumeMode,
     payload.controlType === 'follow_up' ? payload.question : undefined
   )
   if (payload.controlId) await repository.markControlProcessed(payload.runId, payload.controlId)
+  return result
 }
 
-await queue.ensureGroup(config.REDIS_STREAM_AGENT)
-await queue.ensureGroup(config.REDIS_STREAM_CONTROLS)
-console.log(`ownagent worker ${consumer} listening on ${config.REDIS_STREAM_AGENT}`)
-async function agentLoop() {
-  const activeTasks = new Set<Promise<void>>()
-  const launch = (message: { id: string; values: Record<string, string> }) => {
-    const task = handleAgentMessage(message).finally(() => activeTasks.delete(task))
-    activeTasks.add(task)
-  }
-  while (!stopping) {
-    while (!stopping && activeTasks.size < config.WORKER_CONCURRENCY) {
-      const slots = config.WORKER_CONCURRENCY - activeTasks.size
-      const reclaimed = await queue.reclaim(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, consumer, config.REDIS_RECLAIM_IDLE_MS, slots)
-      if (reclaimed.length) { reclaimed.forEach(launch); continue }
-      const messages = await queue.read(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, consumer, slots, 1000)
-      if (!messages.length) break
-      messages.forEach(launch)
-    }
-    if (activeTasks.size) await Promise.race(activeTasks)
-  }
-  await Promise.all(activeTasks)
-}
-async function controlLoop() {
-  const controlConsumer = `${consumer}-controls`
-  const activeTasks = new Set<Promise<void>>()
-  const launch = (message: { id: string; values: Record<string, string> }) => {
-    const task = handleControlMessage(message).finally(() => activeTasks.delete(task))
-    activeTasks.add(task)
-  }
-  while (!stopping) {
-    while (!stopping && activeTasks.size < config.CONTROL_CONCURRENCY) {
-      const slots = config.CONTROL_CONCURRENCY - activeTasks.size
-      const reclaimed = await queue.reclaim(config.REDIS_STREAM_CONTROLS, config.REDIS_CONSUMER_GROUP, controlConsumer, config.REDIS_RECLAIM_IDLE_MS, slots)
-      if (reclaimed.length) { reclaimed.forEach(launch); continue }
-      const messages = await queue.read(config.REDIS_STREAM_CONTROLS, config.REDIS_CONSUMER_GROUP, controlConsumer, slots, 1000)
-      if (!messages.length) break
-      messages.forEach(launch)
-    }
-    if (activeTasks.size) await Promise.race(activeTasks)
-  }
-  await Promise.all(activeTasks)
-}
-async function handleAgentMessage(message: { id: string; values: Record<string, string> }) {
+async function handleAgent(message: StreamMessage) {
   try {
-    await withPendingLease(config.REDIS_STREAM_AGENT, message, () => processMessage(message))
-    await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+    let result: AgentMessageResult = 'unhandled'
+    await lease(config.REDIS_STREAM_AGENT, message, async () => {
+      result = await processMessage(message)
+    })
+    if (result !== 'unhandled')
+      await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
   } catch {
     try {
-      const payload = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
-      if (payload.runId && (await publishRunDeadLetter(payload.runId, message.id))) await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
-    } catch { /* leave pending */ }
+      const p = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
+      if (p.runId && (await deadLetter(p.runId, message.id)))
+        await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
+    } catch {
+      /* pending */
+    }
   }
 }
-async function handleControlMessage(message: { id: string; values: Record<string, string> }) {
+async function handleControl(message: StreamMessage) {
   try {
-    await withPendingLease(config.REDIS_STREAM_CONTROLS, message, () => processControl(message), `${consumer}-controls`)
-    await queue.ackAndDelete(config.REDIS_STREAM_CONTROLS, config.REDIS_CONSUMER_GROUP, message.id)
-  } catch { /* leave pending */ }
+    let result: AgentMessageResult = 'unhandled'
+    await lease(
+      config.REDIS_STREAM_CONTROLS,
+      message,
+      async () => {
+        result = await processControl(message)
+      },
+      `${consumer}-controls`
+    )
+    if (result !== 'unhandled')
+      await queue.ackAndDelete(
+        config.REDIS_STREAM_CONTROLS,
+        config.REDIS_CONSUMER_GROUP,
+        message.id
+      )
+  } catch {
+    /* pending */
+  }
 }
-let stopping = false
-process.once('SIGTERM', () => { stopping = true })
-process.once('SIGINT', () => { stopping = true })
 
-/*
-  while (false) {
-    const reclaimed = await queue.reclaim(
-      config.REDIS_STREAM_AGENT,
-      config.REDIS_CONSUMER_GROUP,
-      consumer,
-      config.REDIS_RECLAIM_IDLE_MS
-    )
-    for (const message of reclaimed) {
-      try {
-        await withPendingLease(config.REDIS_STREAM_AGENT, message, () => processMessage(message))
-        await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
-      } catch {
-        // If DB state is already terminal but DLQ publishing failed, retry DLQ before acking.
-        try {
-          const payload = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
-          if (payload.runId && (await publishRunDeadLetter(payload.runId, message.id)))
-            await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
-        } catch {
-          // Keep unhandled failures pending so another Worker can reclaim them.
-        }
+let stopping = false
+const agents = new Set<Promise<void>>()
+const controls = new Set<Promise<void>>()
+function launch(
+  set: Set<Promise<void>>,
+  task: Promise<void>,
+  metric: 'activeAgents' | 'activeControls'
+) {
+  workerMetric(metric)
+  const tracked = task.finally(() => {
+    set.delete(tracked)
+    workerMetric(metric, -1)
+  })
+  set.add(tracked)
+}
+async function loop(
+  stream: string,
+  consumerId: string,
+  limit: number,
+  set: Set<Promise<void>>,
+  handler: (m: StreamMessage) => Promise<void>,
+  metric: 'activeAgents' | 'activeControls'
+) {
+  while (!stopping) {
+    while (!stopping && set.size < limit) {
+      const slots = limit - set.size
+      const reclaimed = await queue.reclaim(
+        stream,
+        config.REDIS_CONSUMER_GROUP,
+        consumerId,
+        config.REDIS_RECLAIM_IDLE_MS,
+        slots
+      )
+      if (reclaimed.length) {
+        reclaimed.forEach(m => launch(set, handler(m), metric))
+        continue
       }
+      const messages = await queue.read(
+        stream,
+        config.REDIS_CONSUMER_GROUP,
+        consumerId,
+        slots,
+        1000
+      )
+      if (!messages.length) break
+      messages.forEach(m => launch(set, handler(m), metric))
     }
-    const messages = await queue.read(
-      config.REDIS_STREAM_AGENT,
-      config.REDIS_CONSUMER_GROUP,
-      consumer,
-      config.WORKER_CONCURRENCY,
-      5000
-    )
-    for (const message of messages) {
-      try {
-        await withPendingLease(config.REDIS_STREAM_AGENT, message, () => processMessage(message))
-        await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
-      } catch {
-        try {
-          const payload = JSON.parse(message.values.payload ?? '{}') as { runId?: string }
-          if (payload.runId && (await publishRunDeadLetter(payload.runId, message.id)))
-            await queue.ackAndDelete(config.REDIS_STREAM_AGENT, config.REDIS_CONSUMER_GROUP, message.id)
-        } catch {
-          // Keep unhandled failures pending so another Worker can reclaim them.
-        }
-      }
-    }
+    if (set.size) await Promise.race(set)
   }
 }
-async function legacyControlLoop() {
-  while (true) {
-    const controlConsumer = `${consumer}-controls`
-    const reclaimed = await queue.reclaim(
-      config.REDIS_STREAM_CONTROLS,
-      config.REDIS_CONSUMER_GROUP,
-      controlConsumer,
-      config.REDIS_RECLAIM_IDLE_MS
-    )
-    for (const message of reclaimed) {
-      try {
-        await withPendingLease(config.REDIS_STREAM_CONTROLS, message, () => processControl(message))
-        await queue.ackAndDelete(
-          config.REDIS_STREAM_CONTROLS,
-          config.REDIS_CONSUMER_GROUP,
-          message.id
-        )
-      } catch {
-        // Keep unhandled control failures pending for reclaim.
-      }
-    }
-    const messages = await queue.read(
-      config.REDIS_STREAM_CONTROLS,
-      config.REDIS_CONSUMER_GROUP,
-      controlConsumer,
-      config.WORKER_CONCURRENCY,
-      5000
-    )
-    for (const message of messages) {
-      try {
-        await withPendingLease(config.REDIS_STREAM_CONTROLS, message, () => processControl(message))
-        await queue.ackAndDelete(
-          config.REDIS_STREAM_CONTROLS,
-          config.REDIS_CONSUMER_GROUP,
-          message.id
-        )
-      } catch {
-        // Keep unhandled control failures pending for reclaim.
-      }
-    }
-  }
+function shutdown() {
+  stopping = true
 }
-*/
-await Promise.all([agentLoop(), controlLoop()])
+process.once('SIGTERM', shutdown)
+process.once('SIGINT', shutdown)
+await queue.ensureGroup(config.REDIS_STREAM_AGENT)
+await queue.ensureGroup(config.REDIS_STREAM_CONTROLS)
+await Promise.all([
+  loop(
+    config.REDIS_STREAM_AGENT,
+    consumer,
+    config.WORKER_CONCURRENCY,
+    agents,
+    handleAgent,
+    'activeAgents'
+  ),
+  loop(
+    config.REDIS_STREAM_CONTROLS,
+    `${consumer}-controls`,
+    config.CONTROL_CONCURRENCY,
+    controls,
+    handleControl,
+    'activeControls'
+  ),
+])
+await waitForTasks([...agents, ...controls], config.WORKER_SHUTDOWN_TIMEOUT_MS, () => {
+  for (const c of controllers.values()) c.abort()
+})
+console.log({ workerMetrics: workerMetricsSnapshot() }, 'worker stopped')
 clearInterval(expiryTimer)
 await queue.close()
