@@ -3,6 +3,7 @@ import type { DocumentContext, Evidence, DocumentReadResult, ComparisonSource } 
 import type { DocumentRepository } from '../modules/documents/repository.js'
 import type { DocumentTools } from './tools/documents.js'
 import type { RetrievalAgent } from './tools/knowledge.js'
+import type { RetrievalMode, SearchExecutionMode } from '../modules/documents/search.js'
 import type {
   ConversationRepository,
   ConversationMessage,
@@ -14,7 +15,45 @@ import { z } from 'zod'
 
 export const CitationSchema = z.object({ documentId: z.string().uuid().or(z.string().min(1)), versionId: z.string().uuid().or(z.string().min(1)), chunkId: z.string().uuid().or(z.string().min(1)), title: z.string().max(500), pageNumber: z.number().int().optional(), headingPath: z.array(z.string()).optional(), quote: z.string().max(2000).optional() })
 export const MemoryCandidateSchema = z.object({ scope: z.enum(['user', 'workspace']), type: z.enum(['preference', 'fact', 'instruction']), key: z.string().min(1).max(100), value: z.record(z.string(), z.unknown()), summary: z.string().min(1).max(500), confidence: z.number().min(0).max(1), sensitivity: z.enum(['normal', 'sensitive']), autoSave: z.boolean(), sourceMessageId: z.string().optional() })
-export const MemoryCandidatesSchema = z.object({ candidates: z.array(MemoryCandidateSchema).max(20) })
+function normalizeMemoryCandidate(value: unknown, index: number) {
+  const candidate = typeof value === 'string'
+    ? { content: value }
+    : value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const category = String(candidate.type ?? candidate.category ?? '').toLowerCase()
+  const type = category.includes('instruction') || category.includes('指令')
+    ? 'instruction'
+    : category.includes('fact') || category.includes('事实')
+      ? 'fact'
+      : 'preference'
+  const summary = String(candidate.summary ?? candidate.content ?? candidate.text ?? '').trim()
+  const key = String(candidate.key ?? `${type}:${summary.slice(0, 80) || index}`).trim()
+  const rawValue = candidate.value
+  const valueObject = rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)
+    ? rawValue
+    : { content: rawValue ?? candidate.content ?? summary }
+  return {
+    scope: candidate.scope === 'workspace' ? 'workspace' : 'user',
+    type,
+    key,
+    value: valueObject,
+    summary: summary || key,
+    confidence: typeof candidate.confidence === 'number' ? candidate.confidence : 0.8,
+    sensitivity: candidate.sensitivity === 'sensitive' ? 'sensitive' : 'normal',
+    autoSave: typeof candidate.autoSave === 'boolean'
+      ? candidate.autoSave
+      : category.includes('preference') || category.includes('偏好'),
+    sourceMessageId: typeof candidate.sourceMessageId === 'string' ? candidate.sourceMessageId : undefined,
+  }
+}
+
+const NormalizedMemoryCandidatesSchema = z.preprocess(value => {
+  if (Array.isArray(value)) return { candidates: value.map(normalizeMemoryCandidate) }
+  if (!value || typeof value !== 'object') return { candidates: [] }
+  const response = value as Record<string, unknown>
+  const candidates = response.candidates ?? response.memories ?? response.memory_candidates ?? response.memory ?? response.items
+  return { candidates: Array.isArray(candidates) ? candidates.map(normalizeMemoryCandidate) : [] }
+}, z.object({ candidates: z.array(MemoryCandidateSchema).max(20) }))
+export const MemoryCandidatesSchema = NormalizedMemoryCandidatesSchema
 export const DocumentSummarySchema = z.object({ summary: z.string().max(8000), keyPoints: z.array(z.string().max(1000)).max(30), citations: z.array(CitationSchema).max(30) })
 export const DocumentComparisonSchema = z.object({ topics: z.array(z.object({ topic: z.string().max(300), left: z.string().max(2000), right: z.string().max(2000), changeType: z.enum(['added', 'removed', 'changed', 'unchanged']), citations: z.array(CitationSchema).max(20) })).max(50), conclusion: z.string().max(5000) })
 export type DocumentSummary = z.infer<typeof DocumentSummarySchema>
@@ -68,6 +107,7 @@ export type KnowledgeAgentState = {
   documentSources?: ComparisonSource[]
   summary?: DocumentSummary
   comparison?: DocumentComparison
+  retrieval?: { mode: SearchExecutionMode; vectorCount: number; lexicalCount: number; failures: string[] }
 }
 export type KnowledgeGraphDeps = {
   retrieval?: RetrievalAgent
@@ -77,6 +117,7 @@ export type KnowledgeGraphDeps = {
   supervisor?: SupervisorAgent
   documents?: DocumentRepository
   documentTools?: DocumentTools
+  retrievalMode?: RetrievalMode
 }
 
 export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: KnowledgeGraphDeps = {}) {
@@ -125,6 +166,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       documentSources: { reducer: (_: ComparisonSource[], v: ComparisonSource[]) => v, default: () => [] },
       summary: { reducer: (_: DocumentSummary | undefined, v: DocumentSummary | undefined) => v, default: () => undefined },
       comparison: { reducer: (_: DocumentComparison | undefined, v: DocumentComparison | undefined) => v, default: () => undefined },
+      retrieval: { reducer: (_: KnowledgeAgentState['retrieval'], v: KnowledgeAgentState['retrieval']) => v, default: () => undefined },
     },
   } as any)
   graph.addNode('load_context', async (state: KnowledgeAgentState) => ({
@@ -171,9 +213,9 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     if (!deps.retrieval || !state.supervisorDecision?.plan.includes('search_knowledge')) return { evidence: [] }
     const result = await deps.retrieval.search(
       { userId: state.userId, workspaceId: state.workspaceId, role: 'viewer' } as DocumentContext,
-      { query: state.supervisorDecision?.query ?? state.input ?? '', documentIds: state.supervisorDecision?.documentIds, limit: 8, mode: 'vector' }
+      { query: state.supervisorDecision?.query ?? state.input ?? '', documentIds: state.supervisorDecision?.documentIds, limit: 8, mode: deps.retrievalMode ?? 'hybrid' }
     )
-    return { evidence: result.evidence }
+    return { evidence: result.evidence, retrieval: result.retrieval }
   })
   graph.addNode('read_documents', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision
@@ -237,7 +279,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
   graph.addNode('extract_memory_candidates', async (state: KnowledgeAgentState) => {
     if (!deps.model || !state.input) return { memoryCandidates: [], requiresMemoryConfirmation: false }
     try {
-      const result = await deps.model.chatJson([{ role: 'system', content: '只提取用户明确表达的长期记忆候选，禁止推测。敏感信息和事实不得自动保存。只输出 JSON。' }, { role: 'user', content: JSON.stringify({ input: state.input, sourceMessageId: undefined }) }], MemoryCandidatesSchema)
+      const result = await deps.model.chatJson([{ role: 'system', content: '只提取用户明确表达的长期记忆候选，禁止推测。敏感信息和事实不得自动保存。只输出 JSON，顶层必须是 {"candidates":[]}；候选字段必须包含 scope、type、key、value、summary、confidence、sensitivity、autoSave。没有候选时输出 {"candidates":[]}。' }, { role: 'user', content: JSON.stringify({ input: state.input, sourceMessageId: undefined }) }], MemoryCandidatesSchema)
       const candidates: MemoryCandidate[] = result.candidates.map(c => ({ ...c, autoSave: c.autoSave && c.sensitivity === 'normal' && c.confidence >= 0.8 }))
       return { memoryCandidates: candidates, requiresMemoryConfirmation: candidates.some(c => !c.autoSave) }
     } catch { return { memoryCandidates: [], requiresMemoryConfirmation: false } }

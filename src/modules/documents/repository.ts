@@ -198,6 +198,14 @@ export class DocumentRepository {
     embedding: number[],
     limit: number
   ): Promise<SearchResult[]> {
+    return this.searchVector(context, embedding, limit)
+  }
+
+  async searchVector(
+    context: DocumentContext,
+    embedding: number[],
+    limit: number
+  ): Promise<SearchResult[]> {
     const { data, error } = await this.db.rpc('search_knowledge_chunks', {
       p_workspace_id: context.workspaceId,
       p_user_id: context.userId,
@@ -205,6 +213,27 @@ export class DocumentRepository {
       p_limit: limit,
     })
     if (error) throw new Error(`Knowledge search failed: ${error.message}`)
+    return (data ?? []).map((row: Record<string, unknown>) => ({
+      chunkId: String(row.chunk_id),
+      documentId: String(row.document_id),
+      title: String(row.title),
+      content: String(row.content),
+      metadata: (row.metadata ?? {}) as Record<string, unknown>,
+      score: Number(row.score),
+      versionId: row.version_id ? String(row.version_id) : undefined,
+      pageNumber: row.page_number ? Number(row.page_number) : undefined,
+      headingPath: Array.isArray(row.heading_path) ? row.heading_path.map(String) : undefined,
+    }))
+  }
+
+  async searchLexical(context: DocumentContext, query: string, limit: number): Promise<SearchResult[]> {
+    const { data, error } = await this.db.rpc('search_knowledge_chunks_lexical', {
+      p_workspace_id: context.workspaceId,
+      p_user_id: context.userId,
+      p_query: query,
+      p_limit: limit,
+    })
+    if (error) throw new Error(`Knowledge lexical search failed: ${error.message}`)
     return (data ?? []).map((row: Record<string, unknown>) => ({
       chunkId: String(row.chunk_id),
       documentId: String(row.document_id),

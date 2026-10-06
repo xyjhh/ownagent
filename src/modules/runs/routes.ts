@@ -129,7 +129,8 @@ export function createRunRouter(
         String(request.params.runId),
         input.data.approvalId,
         false,
-        input.data.controlId ?? crypto.randomUUID()
+        input.data.controlId ?? crypto.randomUUID(),
+        input.data.reason
       )
       response.json({ run })
     } catch (error) {

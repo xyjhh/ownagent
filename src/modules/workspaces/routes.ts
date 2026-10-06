@@ -59,5 +59,31 @@ export function createWorkspaceRouter(
       }
     }
   )
+  router.get('/:workspaceId/members', requireWorkspaceAccess(auth, repository, ['owner', 'admin', 'editor', 'viewer'], config), async (request, response, next) => {
+    try { response.json({ members: await repository.listMembers(request.workspace!.workspaceId) }) } catch (error) { next(error) }
+  })
+  router.patch('/:workspaceId/members/:userId', requireWorkspaceAccess(auth, repository, ['owner', 'admin'], config), async (request, response, next) => {
+    try {
+      const input = z.object({ role: z.enum(['admin', 'editor', 'viewer']) }).safeParse(request.body)
+      if (!input.success) return response.status(400).json({ error: 'INVALID_ROLE' })
+      if (String(request.params.userId) === request.workspace!.userId && request.workspace!.role !== 'owner') return response.status(403).json({ error: 'OWNER_REQUIRED' })
+      const target = await repository.findMembership(String(request.params.userId), request.workspace!.workspaceId)
+      if (!target) return response.status(404).json({ error: 'MEMBER_NOT_FOUND' })
+      if (target.role === 'owner') return response.status(403).json({ error: 'OWNER_PROTECTED' })
+      if (request.workspace!.role === 'admin' && input.data.role === 'admin') return response.status(403).json({ error: 'OWNER_REQUIRED' })
+      const member = await repository.updateMemberRole(request.workspace!.workspaceId, String(request.params.userId), input.data.role)
+      response.json({ member })
+    } catch (error) { next(error) }
+  })
+  router.delete('/:workspaceId/members/:userId', requireWorkspaceAccess(auth, repository, ['owner', 'admin'], config), async (request, response, next) => {
+    try {
+      const target = await repository.findMembership(String(request.params.userId), request.workspace!.workspaceId)
+      if (!target) return response.status(404).json({ error: 'MEMBER_NOT_FOUND' })
+      if (target.role === 'owner' || String(request.params.userId) === request.workspace!.userId) return response.status(403).json({ error: 'OWNER_PROTECTED' })
+      if (request.workspace!.role === 'admin' && target.role === 'admin') return response.status(403).json({ error: 'OWNER_REQUIRED' })
+      await repository.removeMember(request.workspace!.workspaceId, String(request.params.userId))
+      response.status(204).end()
+    } catch (error) { next(error) }
+  })
   return router
 }

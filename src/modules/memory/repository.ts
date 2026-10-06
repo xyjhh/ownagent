@@ -7,8 +7,8 @@ export type MemoryTask = { id: string; taskType: MemoryTaskType; workspaceId: st
 export type MemoryItem = { id: string; workspaceId: string; ownerUserId?: string; scope: 'user' | 'workspace'; type: 'preference' | 'fact' | 'instruction'; key: string; value: Record<string, unknown>; summary: string; confidence: number; status: string; sensitivity: 'normal' | 'sensitive' }
 export class MemoryRepository {
   constructor(private readonly db: SupabaseClient) {}
-  async list(workspaceId: string, userId: string, limit = 20) {
-    const { data, error } = await this.db.from('memory_items').select('*').eq('workspace_id', workspaceId).eq('status', 'active').or(`scope.eq.workspace,owner_user_id.eq.${userId}`).order('updated_at', { ascending: false }).limit(limit)
+  async list(workspaceId: string, userId: string, limit = 20, includePending = false) {
+    const { data, error } = await this.db.from('memory_items').select('*').eq('workspace_id', workspaceId).in('status', includePending ? ['active', 'pending_confirmation'] : ['active']).or(`scope.eq.workspace,owner_user_id.eq.${userId}`).order('updated_at', { ascending: false }).limit(limit)
     if (error) throw new Error(`Memory lookup failed: ${error.message}`)
     return (data ?? []).map(row => this.map(row))
   }

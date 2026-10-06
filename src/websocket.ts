@@ -29,6 +29,7 @@ const messageSchema = z.discriminatedUnion('type', [
     type: z.literal('start_run'),
     workspaceId: z.string().uuid(),
     question: z.string().min(1).max(20_000),
+    conversationId: z.string().uuid().optional(),
     idempotencyKey: z.string().min(1).max(200),
   }),
   z.object({
@@ -151,7 +152,7 @@ export class RealtimeWebSocketServer {
           typeof input.idempotencyKey === 'string' ? input.idempotencyKey.trim() : ''
         if (!idempotencyKey || idempotencyKey.length > 200)
           throw new ApiError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'idempotencyKey is required')
-        const run = await this.runService.create(membership, { question }, idempotencyKey)
+        const run = await this.runService.create(membership, { question, ...(typeof input.conversationId === 'string' ? { conversationId: input.conversationId } : {}) }, idempotencyKey)
         this.send(client, { type: 'run_created', run })
         return this.subscribe(client, workspaceId, run.id, 0)
       }
@@ -166,7 +167,8 @@ export class RealtimeWebSocketServer {
           runId,
           String(input.approvalId ?? ''),
           type === 'approve',
-          controlId
+          controlId,
+          type === 'reject' && typeof input.reason === 'string' ? input.reason : undefined
         )
         return this.send(client, { type: 'status', runId, status: run?.status })
       }

@@ -23,7 +23,7 @@ export function createDocumentRouter(
 ): Router {
   const router = Router()
   const repository = new DocumentRepository(db)
-  const service = new DocumentService(repository, embedding, reranker)
+  const service = new DocumentService(repository, embedding, reranker, config?.RETRIEVAL_MODE ?? 'hybrid')
   const resumable = config ? new SupabaseResumableStorage(config) : null
   const multipart = config?.SUPABASE_S3_ENDPOINT && config.SUPABASE_S3_ACCESS_KEY && config.SUPABASE_S3_SECRET_KEY ? new SupabaseMultipartStorage(config) : null
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config?.DOCUMENT_MAX_FILE_SIZE_BYTES ?? 52_428_800 } })

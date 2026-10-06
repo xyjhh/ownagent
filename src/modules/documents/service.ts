@@ -3,12 +3,14 @@ import type { RerankerClient } from '../../integrations/reranker.js'
 import type { WorkspaceContext } from '../workspaces/types.js'
 import type { DocumentRepository } from './repository.js'
 import type { DocumentVisibility } from './types.js'
+import { retrieveCandidates, type RetrievalMode } from './search.js'
 
 export class DocumentService {
   constructor(
     private readonly repository: DocumentRepository,
     private readonly embedding: EmbeddingClient,
-    private readonly reranker: RerankerClient
+    private readonly reranker: RerankerClient,
+    private readonly retrievalMode: RetrievalMode = 'hybrid'
   ) {}
 
   async create(
@@ -36,12 +38,7 @@ export class DocumentService {
   }
 
   async search(context: WorkspaceContext, query: string, limit = 20) {
-    const embedding = await this.embedding.embed(query)
-    const candidates = await this.repository.search(
-      context,
-      embedding.data[0]?.embedding ?? [],
-      Math.min(limit * 4, 100)
-    )
+    const candidates = (await retrieveCandidates(this.repository, this.embedding, context, query, limit, this.retrievalMode)).results
     if (!candidates.length) return []
     const reranked = await this.reranker.rerank(
       query,

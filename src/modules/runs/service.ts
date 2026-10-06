@@ -53,7 +53,8 @@ export class RunService {
     runId: string,
     approvalId: string,
     value: boolean,
-    controlId: string
+    controlId: string,
+    reason?: string
   ) {
     const run = await this.assertController(context, runId)
     const existing = await this.repository.findControl(context, runId, controlId)
@@ -65,13 +66,14 @@ export class RunService {
       runId,
       controlId,
       value ? 'approve' : 'reject',
-      { approvalId, value }
+      { approvalId, value, ...(reason ? { reason } : {}) }
     )
     if (control && run.status === 'waiting_approval') await this.repository.resume(runId)
     if (control) {
       const event = await this.repository.appendEvent(runId, value ? 'approved' : 'rejected', {
         approvalId,
         value,
+        ...(reason ? { reason } : {}),
         by: context.userId,
       })
       await this.publish(runId, {

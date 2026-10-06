@@ -78,6 +78,7 @@ const schema = z.object({
   CONVERSATION_SUMMARY_THRESHOLD: z.coerce.number().int().positive().default(30),
   AGENT_MAX_EVIDENCE: z.coerce.number().int().positive().max(50).default(8),
   AGENT_MAX_CONTEXT_TOKENS: z.coerce.number().int().positive().default(12_000),
+  RETRIEVAL_MODE: z.enum(['vector', 'hybrid']).default('hybrid'),
   SUPERVISOR_MODEL: z.string().optional(),
   SUPERVISOR_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   SUPERVISOR_MAX_RETRIES: z.coerce.number().int().min(0).max(3).default(1),

@@ -13,6 +13,19 @@ export class StructuredModelError extends Error {
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
 export type ChatCompletion = { id: string; choices: Array<{ message: ChatMessage }> }
 
+function parseStructuredContent(content: string): unknown {
+  const trimmed = content.trim()
+  const withoutFence = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
+  try {
+    return JSON.parse(withoutFence)
+  } catch {
+    const start = withoutFence.search(/[\[{]/)
+    const end = Math.max(withoutFence.lastIndexOf('}'), withoutFence.lastIndexOf(']'))
+    if (start >= 0 && end > start) return JSON.parse(withoutFence.slice(start, end + 1))
+    throw new Error('Structured model response is not valid JSON')
+  }
+}
+
 export class DeepSeekClient {
   constructor(private readonly config: AppConfig) {}
 
@@ -51,7 +64,7 @@ export class DeepSeekClient {
         const content = response.choices?.[0]?.message?.content
         if (!content) throw new StructuredModelError('MODEL_INVALID_JSON', 'Structured model response is empty')
         let parsed: unknown
-        try { parsed = JSON.parse(content) } catch (error) { throw new StructuredModelError('MODEL_INVALID_JSON', 'Structured model response is not valid JSON', { cause: error }) }
+        try { parsed = parseStructuredContent(content) } catch (error) { throw new StructuredModelError('MODEL_INVALID_JSON', 'Structured model response is not valid JSON', { cause: error }) }
         try { return schema.parse(parsed) } catch (error) { throw new StructuredModelError('MODEL_SCHEMA_INVALID', 'Structured model response failed schema validation', { cause: error }) }
       } catch (error) {
         lastError = error

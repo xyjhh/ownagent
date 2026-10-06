@@ -28,9 +28,9 @@ const queue = new RedisStreams(config)
 const conversations = new ConversationRepository(db)
 const memories = new MemoryRepository(db)
 const documents = new DocumentRepository(db)
-const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config), new RerankerClient(config))
+const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config), new RerankerClient(config), config.RETRIEVAL_MODE)
 const model = new DeepSeekClient(config)
-const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, documents, documentTools: new DocumentTools(documents), model, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
+const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, retrievalMode: config.RETRIEVAL_MODE, documents, documentTools: new DocumentTools(documents), model, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
 const tracer = new LangfuseTracer(config)
 const consumer = `${process.env.HOSTNAME ?? 'worker'}-${randomUUID()}`
 const controllers = new Map<string, AbortController>()
@@ -132,7 +132,7 @@ async function processMessage(
         : new Command({ resume: resumeValue })
     let output: string | undefined
     let interrupt: Record<string, unknown> | undefined
-    const stream = graph.stream(
+    const stream = await graph.stream(
       input,
       {
         configurable: {
@@ -165,8 +165,17 @@ async function processMessage(
           if (Number(decision.confidence) === 0) workerMetric('supervisorLowConfidence')
         }
         if (node === 'validate_plan' && state?.planRejected) { await event(run.id, run.workspaceId, 'plan_rejected', { reason: 'PLAN_VALIDATION_FAILED' }); workerMetric('planRejections') }
-        if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_started', {})
-        if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_completed', { evidenceCount: Array.isArray(state?.evidence) ? state.evidence.length : 0 })
+        if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_started', { mode: state?.retrieval && (state.retrieval as any).mode })
+        if (node === 'retrieve_evidence') {
+          const retrieval = (state?.retrieval ?? {}) as any
+          await event(run.id, run.workspaceId, 'retrieval_completed', {
+            evidenceCount: Array.isArray(state?.evidence) ? state.evidence.length : 0,
+            mode: retrieval.mode,
+            vectorCount: retrieval.vectorCount ?? 0,
+            lexicalCount: retrieval.lexicalCount ?? 0,
+            failures: retrieval.failures ?? [],
+          })
+        }
         if (node === 'summarize_document' && state?.summary) await event(run.id, run.workspaceId, 'summary_completed', { citationCount: Array.isArray((state.summary as any).citations) ? (state.summary as any).citations.length : 0 })
         if (node === 'compare_documents' && state?.comparison) await event(run.id, run.workspaceId, 'comparison_completed', { topicCount: Array.isArray((state.comparison as any).topics) ? (state.comparison as any).topics.length : 0 })
         if (node === 'persist_response' && Array.isArray(state?.citations)) {

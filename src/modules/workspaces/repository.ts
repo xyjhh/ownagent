@@ -54,6 +54,38 @@ export class WorkspaceRepository {
       : null
   }
 
+  async listMembers(workspaceId: string) {
+    const { data, error } = await this.db
+      .from('workspace_members')
+      .select('workspace_id,user_id,role,status,joined_at,app_users(id,email)')
+      .eq('workspace_id', workspaceId)
+      .order('joined_at', { ascending: true })
+    if (error) fail(error, 'workspace member listing')
+    return (data ?? []).map(row => {
+      const user = row.app_users as unknown as Record<string, unknown> | null
+      return {
+        workspaceId: String(row.workspace_id),
+        userId: String(row.user_id),
+        role: String(row.role) as WorkspaceRole,
+        status: String(row.status),
+        joinedAt: String(row.joined_at),
+        user: user ? { id: String(user.id), email: String(user.email), displayName: user.display_name ? String(user.display_name) : undefined } : undefined,
+      }
+    })
+  }
+
+  async updateMemberRole(workspaceId: string, userId: string, role: WorkspaceRole) {
+    const { data, error } = await this.db.from('workspace_members').update({ role }).eq('workspace_id', workspaceId).eq('user_id', userId).eq('status', 'active').select('workspace_id,user_id,role,status,joined_at').maybeSingle()
+    if (error) fail(error, 'workspace member role update')
+    return data
+  }
+
+  async removeMember(workspaceId: string, userId: string) {
+    const { data, error } = await this.db.from('workspace_members').update({ status: 'suspended' }).eq('workspace_id', workspaceId).eq('user_id', userId).eq('status', 'active').select('user_id').maybeSingle()
+    if (error) fail(error, 'workspace member removal')
+    return data
+  }
+
   async create(userId: string, name: string, slug: string): Promise<Workspace> {
     const { data, error } = await this.db
       .from('workspaces')
