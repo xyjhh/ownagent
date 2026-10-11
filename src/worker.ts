@@ -143,6 +143,9 @@ async function processMessage(
     if (resumeValue === undefined && run.input.conversationId && typeof run.input.question === 'string') {
       await conversations.append({ conversationId: String(run.input.conversationId), workspaceId: run.workspaceId, userId: run.requestedBy, role: 'user', content: run.input.question })
     }
+    if (resumeMode === 'waiting_user' && run.input.conversationId && typeof initialInput === 'string') {
+      await conversations.append({ conversationId: String(run.input.conversationId), workspaceId: run.workspaceId, userId: run.requestedBy, role: 'user', content: initialInput })
+    }
     await event(run.id, run.workspaceId, 'started', {
       attempt: run.attempt + 1,
       sessionId: run.threadId,
@@ -237,6 +240,19 @@ async function processMessage(
     }
     if (interrupt) {
       await flushAnswerStream(run.id)
+      if (interrupt.kind === 'question' && run.input.conversationId && typeof interrupt.question === 'string') {
+        try {
+          await conversations.append({
+            conversationId: String(run.input.conversationId),
+            workspaceId: run.workspaceId,
+            userId: run.requestedBy,
+            role: 'assistant',
+            content: interrupt.question,
+          })
+        } catch {
+          // A clarification prompt is user-facing, but persistence must not prevent the run from waiting.
+        }
+      }
       await event(run.id, run.workspaceId, 'interrupt', { interrupt })
       if (interrupt.kind === 'approval') {
         await repository.markWaitingApproval(run.id)

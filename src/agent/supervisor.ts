@@ -47,7 +47,7 @@ function normalizeSupervisorDecision(value: unknown): unknown {
       return supervisorPlanAliases[raw.replace(/_/g, '')] ?? raw
     })
   }
-  for (const key of ['needsRetrieval', 'requiresApproval']) {
+  for (const key of ['needsRetrieval', 'requiresApproval', 'needsClarification']) {
     if (typeof input[key] === 'string' && /^(true|false)$/i.test(input[key] as string)) output[key] = input[key] === 'true'
   }
   if (typeof input.confidence === 'string' && input.confidence.trim() !== '') {
@@ -55,10 +55,15 @@ function normalizeSupervisorDecision(value: unknown): unknown {
     if (Number.isFinite(confidence)) output.confidence = confidence
   }
   for (const key of ['query', 'reason', 'documentIds']) if (output[key] === null) delete output[key]
+  if (output.clarificationQuestion === null) delete output.clarificationQuestion
+  if (Array.isArray(output.clarificationOptions)) {
+    output.clarificationOptions = [...new Set(output.clarificationOptions
+      .map(option => typeof option === 'string' ? option.trim() : option))]
+  }
   return output
 }
 
-export const supervisorDecisionSchema = z.preprocess(normalizeSupervisorDecision, z.object({
+const supervisorDecisionObjectSchema = z.object({
   intent: z.enum(['knowledge_query', 'document_summary', 'document_compare', 'general_chat']),
   needsRetrieval: z.boolean(),
   query: z.string().max(4000).optional(),
@@ -67,13 +72,22 @@ export const supervisorDecisionSchema = z.preprocess(normalizeSupervisorDecision
   requiresApproval: z.boolean(),
   confidence: z.number().min(0).max(1),
   reason: z.string().max(500).optional(),
-}))
+  needsClarification: z.boolean().default(false),
+  clarificationQuestion: z.string().trim().min(1).max(1000).optional(),
+  clarificationOptions: z.array(z.string().trim().min(1).max(200)).max(6).optional(),
+}).superRefine((value, ctx) => {
+  if (value.needsClarification && !value.clarificationQuestion) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['clarificationQuestion'], message: 'clarificationQuestion is required when needsClarification is true' })
+  }
+})
+
+export const supervisorDecisionSchema = z.preprocess(normalizeSupervisorDecision, supervisorDecisionObjectSchema)
 
 export type SupervisorDecision = z.infer<typeof supervisorDecisionSchema>
 export type SupervisorContext = { workspaceId: string; userId: string; role?: string; trace?: TraceContext }
 
 export function fallbackDecision(input: string): SupervisorDecision {
-  return { intent: 'knowledge_query', needsRetrieval: true, query: input.slice(0, 4000), plan: ['search_knowledge', 'generate_answer'], requiresApproval: false, confidence: 0, reason: 'supervisor_fallback' }
+  return { intent: 'knowledge_query', needsRetrieval: true, query: input.slice(0, 4000), plan: ['search_knowledge', 'generate_answer'], requiresApproval: false, confidence: 0, reason: 'supervisor_fallback', needsClarification: false }
 }
 
 export class SupervisorAgent {
@@ -84,7 +98,7 @@ export class SupervisorAgent {
     const control = this.controlDecision(trimmed)
     if (control) return { decision: control, fallback: false }
     const messages = [
-      { role: 'system' as const, content: '你是企业知识库任务规划器。只输出一个合法 JSON 对象，不要 Markdown、代码围栏、解释或额外字段。输出格式示例：{"intent":"knowledge_query","needsRetrieval":true,"query":"问题改写，可选","documentIds":[],"plan":["search_knowledge","generate_answer"],"requiresApproval":false,"confidence":0.9,"reason":"可选简短原因"}。intent 只能是 knowledge_query、document_summary、document_compare、general_chat；plan 中每一项只能是 search_knowledge、get_document、compare_documents、generate_answer；plan 至少包含一项；confidence 必须是 0 到 1 的数字。只能选择允许的 intent 和 plan，不能执行工具、决定权限或编造事实。不明确时选择只读 knowledge_query。涉及写操作时 requiresApproval 必须为 true。' },
+      { role: 'system' as const, content: '你是企业知识库任务规划器。只输出一个合法 JSON 对象，不要 Markdown、代码围栏、解释或额外字段。输出格式示例：{"intent":"knowledge_query","needsRetrieval":true,"query":"问题改写，可选","documentIds":[],"plan":["search_knowledge","generate_answer"],"requiresApproval":false,"confidence":0.9,"reason":"可选简短原因","needsClarification":false,"clarificationQuestion":"可选的面向用户的问题","clarificationOptions":[]}。intent 只能是 knowledge_query、document_summary、document_compare、general_chat；plan 中每一项只能是 search_knowledge、get_document、compare_documents、generate_answer；plan 至少包含一项；confidence 必须是 0 到 1 的数字。信息不足以安全执行时设置 needsClarification=true，提供简短的 clarificationQuestion；存在有限选择时提供最多 6 个 clarificationOptions，不要猜测用户未提供的信息。只能选择允许的 intent 和 plan，不能执行工具、决定权限或编造事实。不明确时选择只读 knowledge_query。涉及写操作时 requiresApproval 必须为 true。' },
       { role: 'user' as const, content: JSON.stringify({ input: trimmed, workspaceId: context.workspaceId, role: context.role ?? 'viewer', allowedPlans: ['search_knowledge', 'get_document', 'compare_documents', 'generate_answer'] }) },
     ]
     try {
@@ -97,12 +111,11 @@ export class SupervisorAgent {
   }
 
   private controlDecision(input: string): SupervisorDecision | undefined {
-    if (!input) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1, reason: 'empty_input' }
+    if (!input) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1, reason: 'empty_input', needsClarification: false }
     const lower = input.toLowerCase()
     const isApproval = lower.startsWith('approve:')
-    const isQuestion = lower.startsWith('ask:')
-    const isControl = isApproval || isQuestion || new Set(['cancel', 'stop', '继续', '拒绝']).has(input)
-    if (isControl) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: isApproval, confidence: 1, reason: 'control_input' }
+    const isControl = isApproval || new Set(['cancel', 'stop', '继续', '拒绝']).has(input)
+    if (isControl) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: isApproval, confidence: 1, reason: 'control_input', needsClarification: false }
     return undefined
   }
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Command, MemorySaver } from '@langchain/langgraph'
 import { createKnowledgeAgentGraph } from '../src/agent/graph.js'
 
 describe('knowledge graph', () => {
@@ -76,5 +77,37 @@ describe('knowledge graph', () => {
     const result = await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r2', conversationId: 'c0', input: '你好' })
     expect(result.answer).toBe('你好！')
     expect(retrievalCalls).toBe(0)
+  })
+
+  it('waits for clarification before retrieval and replans after the user responds', async () => {
+    const saver = new MemorySaver()
+    let classifyCalls = 0
+    let retrievalCalls = 0
+    const graph = createKnowledgeAgentGraph(saver, {
+      retrieval: { search: async () => { retrievalCalls += 1; return { sufficient: true, evidence: [] } } } as any,
+      supervisor: {
+        classify: async () => {
+          classifyCalls += 1
+          return classifyCalls === 1
+            ? { decision: { intent: 'knowledge_query', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 0.95, needsClarification: true, clarificationQuestion: '你想了解哪一类信息？', clarificationOptions: ['期望薪资', '岗位职责'] }, fallback: false }
+            : { decision: { intent: 'knowledge_query', needsRetrieval: true, plan: ['search_knowledge', 'generate_answer'], requiresApproval: false, confidence: 0.95, needsClarification: false }, fallback: false }
+        },
+      } as any,
+      conversations: { recent: async () => [], summary: async () => undefined, append: async (value: any) => value } as any,
+      memories: { list: async () => [] } as any,
+      model: { streamChat: async function* () { yield '已根据补充信息回答。' } } as any,
+    })
+    const config = { configurable: { thread_id: 'clarification-thread' } }
+    const firstChunks: any[] = []
+    for await (const chunk of await graph.stream({ workspaceId: 'w1', userId: 'u1', runId: 'r5', conversationId: 'c0', input: '我想了解这份简历' }, config, { streamMode: 'updates' })) firstChunks.push(chunk)
+    const interrupt = firstChunks.find(chunk => chunk.__interrupt__)
+    expect(interrupt?.__interrupt__?.[0]?.value).toMatchObject({ kind: 'question', options: ['期望薪资', '岗位职责'] })
+    expect(retrievalCalls).toBe(0)
+
+    const secondChunks: any[] = []
+    for await (const chunk of await graph.stream(new Command({ resume: '期望薪资' }), config, { streamMode: 'updates' })) secondChunks.push(chunk)
+    expect(classifyCalls).toBe(2)
+    expect(retrievalCalls).toBe(1)
+    expect(secondChunks.some(chunk => chunk.persist_response)).toBe(true)
   })
 })

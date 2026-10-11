@@ -1,4 +1,4 @@
-import { END, START, StateGraph, interrupt } from '@langchain/langgraph'
+import { END, START, StateGraph, interrupt, isGraphInterrupt } from '@langchain/langgraph'
 import type { DocumentContext, Evidence, DocumentReadResult, ComparisonSource } from '../modules/documents/types.js'
 import type { DocumentRepository } from '../modules/documents/repository.js'
 import type { DocumentTools } from './tools/documents.js'
@@ -15,6 +15,8 @@ import { z } from 'zod'
 import type { AnswerDeltaSink } from './answer-stream.js'
 import { selectCitationsFromAnswer } from './citations.js'
 import type { LangfuseTracer, TraceContext } from '../observability/langfuse.js'
+
+const MAX_CLARIFICATION_ROUNDS = 2
 
 export const CitationSchema = z.object({ documentId: z.string().uuid().or(z.string().min(1)), versionId: z.string().uuid().or(z.string().min(1)), chunkId: z.string().uuid().or(z.string().min(1)), title: z.string().max(500), pageNumber: z.number().int().optional(), headingPath: z.array(z.string()).optional(), quote: z.string().max(2000).optional() })
 export const MemoryCandidateSchema = z.object({ scope: z.enum(['user', 'workspace']), type: z.enum(['preference', 'fact', 'instruction']), key: z.string().min(1).max(100), value: z.record(z.string(), z.unknown()), summary: z.string().min(1).max(500), confidence: z.number().min(0).max(1), sensitivity: z.enum(['normal', 'sensitive']), autoSave: z.boolean(), sourceMessageId: z.string().optional() })
@@ -88,6 +90,11 @@ export type MemoryCandidate = {
   autoSave: boolean
   sourceMessageId?: string
 }
+export type ClarificationTurn = {
+  question: string
+  options: string[]
+  answer: string
+}
 export type KnowledgeAgentState = {
   workspaceId: string
   userId: string
@@ -95,6 +102,10 @@ export type KnowledgeAgentState = {
   traceContext?: TraceContext
   conversationId?: string
   input?: string
+  originalInput?: string
+  clarificationHistory?: ClarificationTurn[]
+  clarificationRound?: number
+  clarificationExhausted?: boolean
   intent?: UserIntent
   recentMessages?: ConversationMessage[]
   conversationSummary?: string
@@ -142,6 +153,22 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         reducer: (_: string | undefined, v: string | undefined) => v,
         default: () => undefined,
       },
+      originalInput: {
+        reducer: (_: string | undefined, v: string | undefined) => v,
+        default: () => undefined,
+      },
+      clarificationHistory: {
+        reducer: (_: ClarificationTurn[], v: ClarificationTurn[]) => v,
+        default: () => [],
+      },
+      clarificationRound: {
+        reducer: (_: number, v: number) => v,
+        default: () => 0,
+      },
+      clarificationExhausted: {
+        reducer: (_: boolean, v: boolean) => v,
+        default: () => false,
+      },
       intent: {
         reducer: (_: UserIntent | undefined, v: UserIntent) => v,
         default: () => 'knowledge_query',
@@ -186,7 +213,8 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         span?.end(summarizeNodeUpdate(update))
         return update
       } catch (error) {
-        span?.fail(error, { node: name })
+        if (isGraphInterrupt(error)) span?.end({ status: 'waiting', node: name })
+        else span?.fail(error, { node: name })
         throw error
       }
     })
@@ -202,7 +230,10 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         : undefined,
     memories: deps.memories ? await deps.memories.list(state.workspaceId, state.userId) : [],
   }))
-  addObservedNode('prefilter_input', async (state: KnowledgeAgentState) => ({ input: (state.input ?? '').slice(0, 4000) }))
+  addObservedNode('prefilter_input', async (state: KnowledgeAgentState) => ({
+    input: (state.input ?? '').slice(0, 4000),
+    originalInput: state.originalInput ?? (state.input ?? '').slice(0, 4000),
+  }))
   addObservedNode('intent_recognition', async (state: KnowledgeAgentState) => {
     const result = deps.supervisor ? await deps.supervisor.classify(state.input ?? '', { workspaceId: state.workspaceId, userId: state.userId, trace: state.traceContext }) : { decision: fallbackDecision(state.input ?? ''), fallback: true }
     return { supervisorDecision: result.decision, supervisorFallback: result.fallback, intent: result.decision.intent }
@@ -213,6 +244,11 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
   })
   addObservedNode('validate_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
+    const clarificationRound = state.clarificationRound ?? 0
+    if (decision.needsClarification && clarificationRound >= MAX_CLARIFICATION_ROUNDS) {
+      const safeFallback = fallbackDecision(state.originalInput ?? state.input ?? '')
+      return { supervisorDecision: { ...safeFallback, needsRetrieval: false, plan: ['generate_answer'], reason: 'clarification_limit' }, supervisorFallback: true, planRejected: true, clarificationExhausted: true, intent: 'knowledge_query' }
+    }
     const allowed = new Set(['search_knowledge', 'get_document', 'compare_documents', 'generate_answer'])
     const needsDocuments = Boolean(decision.documentIds?.length || decision.plan.includes('get_document') || decision.plan.includes('compare_documents'))
     const valid = decision.plan.every(item => allowed.has(item)) && (decision.requiresApproval ? decision.plan.includes('generate_answer') : true) && (decision.needsRetrieval === decision.plan.includes('search_knowledge')) && (!needsDocuments || Boolean(deps.documents || deps.documentTools))
@@ -229,6 +265,42 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       } catch { return { supervisorDecision: fallbackDecision(state.input ?? ''), supervisorFallback: true, planRejected: true, intent: 'knowledge_query' } }
     }
     return valid ? {} : { supervisorDecision: fallbackDecision(state.input ?? ''), supervisorFallback: true, planRejected: true, intent: 'knowledge_query' }
+  })
+  addObservedNode('await_user_input', async (state: KnowledgeAgentState) => {
+    const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
+    const options = decision.clarificationOptions ?? []
+    const answer = interrupt({
+      kind: 'question',
+      question: decision.clarificationQuestion ?? '请补充更多信息。',
+      options,
+      allowFreeText: true,
+      round: (state.clarificationRound ?? 0) + 1,
+    })
+    const normalizedAnswer = typeof answer === 'string'
+      ? answer.trim().slice(0, 4000)
+      : typeof answer === 'object' && answer !== null && 'value' in answer
+        ? String((answer as { value?: unknown }).value ?? '').trim().slice(0, 4000)
+        : ''
+    if (!normalizedAnswer) throw new Error('User clarification response is empty')
+    const history = [
+      ...(state.clarificationHistory ?? []),
+      { question: decision.clarificationQuestion ?? '请补充更多信息。', options, answer: normalizedAnswer },
+    ]
+    const originalInput = state.originalInput ?? state.input ?? ''
+    const planningInput = [
+      `原始用户问题：${originalInput}`,
+      ...history.map((turn, index) => `第 ${index + 1} 次用户补充：${turn.answer}`),
+    ].join('\n')
+    return {
+      input: planningInput.slice(0, 20_000),
+      originalInput,
+      clarificationHistory: history,
+      clarificationRound: (state.clarificationRound ?? 0) + 1,
+      clarificationExhausted: false,
+      supervisorDecision: undefined,
+      supervisorFallback: false,
+      planRejected: false,
+    }
   })
   addObservedNode('route_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
@@ -262,6 +334,10 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
   })
   addObservedNode('generate_answer_stream', async (state: KnowledgeAgentState) => {
     if ((state.intent === 'document_summary' || state.intent === 'document_compare') && state.answer) return { output: state.answer }
+    if (state.clarificationExhausted) {
+      const answer = '为了准确回答你的问题，目前提供的信息仍然不足。我可以在你补充具体范围、对象或条件后继续处理。'
+      return { answer, output: answer, citations: [] }
+    }
     const evidenceCitations = (state.evidence ?? []).map(e => ({
       documentId: e.documentId,
       versionId: e.versionId,
@@ -370,20 +446,20 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       })
       return { requiresApproval: true }
     }
-    if (state.input?.toLowerCase().startsWith('ask:')) {
-      interrupt({
-        kind: 'question',
-        question: state.input.slice(4).trim() || 'Please provide more details.',
-      })
-      return { requiresApproval: true }
-    }
     return {}
   })
   graph.addEdge(START, 'prefilter_input')
   graph.addEdge('prefilter_input', 'intent_recognition')
   graph.addEdge('intent_recognition', 'supervisor_plan')
   graph.addEdge('supervisor_plan', 'validate_plan')
-  graph.addEdge('validate_plan', 'route_plan')
+  graph.addConditionalEdges('validate_plan', (state: KnowledgeAgentState) =>
+    state.supervisorDecision?.needsClarification && (state.clarificationRound ?? 0) < MAX_CLARIFICATION_ROUNDS
+      ? 'await_user_input'
+      : 'route_plan', {
+        await_user_input: 'await_user_input',
+        route_plan: 'route_plan',
+      })
+  graph.addEdge('await_user_input', 'prefilter_input')
   const needsDocumentRead = (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision
     return Boolean(

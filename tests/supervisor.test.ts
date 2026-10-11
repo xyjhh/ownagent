@@ -37,4 +37,35 @@ describe('SupervisorAgent', () => {
       confidence: 0.9,
     })
   })
+
+  it('accepts a structured clarification decision and defaults old outputs to no clarification', () => {
+    expect(supervisorDecisionSchema.parse({
+      intent: 'knowledge_query',
+      needsRetrieval: false,
+      plan: ['generate_answer'],
+      requiresApproval: false,
+      confidence: 0.92,
+      needsClarification: true,
+      clarificationQuestion: '你想了解哪一类信息？',
+      clarificationOptions: ['岗位职责', '期望薪资', '岗位职责'],
+    })).toMatchObject({
+      needsClarification: true,
+      clarificationOptions: ['岗位职责', '期望薪资'],
+    })
+    expect(supervisorDecisionSchema.parse({
+      intent: 'general_chat',
+      needsRetrieval: false,
+      plan: ['generate_answer'],
+      requiresApproval: false,
+      confidence: 1,
+    }).needsClarification).toBe(false)
+    expect(() => supervisorDecisionSchema.parse({
+      intent: 'knowledge_query',
+      needsRetrieval: false,
+      plan: ['generate_answer'],
+      requiresApproval: false,
+      confidence: 0.9,
+      needsClarification: true,
+    })).toThrow()
+  })
 })

@@ -118,6 +118,8 @@ export class RunService {
     const run = await this.assertController(context, runId)
     if (type === 'follow_up' && ['canceled', 'failed'].includes(run.status))
       throw new ApiError(409, 'RUN_NOT_RESUMABLE', 'Run cannot be resumed')
+    if (type === 'follow_up' && run.status === 'waiting_approval')
+      throw new ApiError(409, 'APPROVAL_REQUIRED', 'Resolve the pending approval before continuing')
     const control = await this.repository.insertControl(context, runId, controlId, type, payload)
     if (!control) return run
     if (type === 'interrupt') await this.repository.markInterrupted(runId)
