@@ -13,6 +13,7 @@ import type { DeepSeekClient } from '../integrations/deepseek.js'
 import { SupervisorAgent, type SupervisorDecision, fallbackDecision } from './supervisor.js'
 import { z } from 'zod'
 import type { AnswerDeltaSink } from './answer-stream.js'
+import { selectCitationsFromAnswer } from './citations.js'
 
 export const CitationSchema = z.object({ documentId: z.string().uuid().or(z.string().min(1)), versionId: z.string().uuid().or(z.string().min(1)), chunkId: z.string().uuid().or(z.string().min(1)), title: z.string().max(500), pageNumber: z.number().int().optional(), headingPath: z.array(z.string()).optional(), quote: z.string().max(2000).optional() })
 export const MemoryCandidateSchema = z.object({ scope: z.enum(['user', 'workspace']), type: z.enum(['preference', 'fact', 'instruction']), key: z.string().min(1).max(100), value: z.record(z.string(), z.unknown()), summary: z.string().min(1).max(500), confidence: z.number().min(0).max(1), sensitivity: z.enum(['normal', 'sensitive']), autoSave: z.boolean(), sourceMessageId: z.string().optional() })
@@ -73,6 +74,7 @@ export type Citation = {
   pageNumber?: number
   headingPath?: string[]
   quote?: string
+  referenceIndex?: number
 }
 export type MemoryCandidate = {
   scope: 'user' | 'workspace'
@@ -242,7 +244,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
   })
   graph.addNode('generate_answer_stream', async (state: KnowledgeAgentState) => {
     if ((state.intent === 'document_summary' || state.intent === 'document_compare') && state.answer) return { output: state.answer }
-    const citations = (state.evidence ?? []).map(e => ({
+    const evidenceCitations = (state.evidence ?? []).map(e => ({
       documentId: e.documentId,
       versionId: e.versionId,
       chunkId: e.chunkId,
@@ -255,7 +257,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         answer: state.intent === 'general_chat'
           ? '你好！我可以帮你查找和整理知识库中的内容。'
           : state.evidence?.length ? state.evidence[0].content : '知识库中没有足够依据。',
-        citations,
+        citations: state.evidence?.length ? [{ ...evidenceCitations[0], referenceIndex: 1 }] : [],
       }
     const answerSink = deps.answerDeltaSink?.({ runId: state.runId, workspaceId: state.workspaceId, node: 'generate_answer_stream' })
     if (state.intent === 'general_chat') {
@@ -292,7 +294,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       await answerSink?.push(delta)
     }
     await answerSink?.flush()
-    return { answer, output: answer, citations }
+    return { answer, output: answer, citations: selectCitationsFromAnswer(answer, evidenceCitations) }
   })
   graph.addNode('extract_memory_candidates', async (state: KnowledgeAgentState) => {
     if (!deps.model || !state.input) return { memoryCandidates: [], requiresMemoryConfirmation: false }
@@ -336,7 +338,9 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         // Summary generation is asynchronous and must not affect the answer outcome.
       }
     }
-    return { output: state.answer }
+    // Return citations in the node update as well as persisting them. The
+    // worker uses this update to publish citation events to live clients.
+    return { output: state.answer, citations: state.citations ?? [] }
   })
   graph.addNode('placeholder', async (state: KnowledgeAgentState) => {
     if (state.input?.toLowerCase().startsWith('approve:') && !state.requiresApproval) {

@@ -36,6 +36,31 @@ describe('knowledge graph', () => {
     expect(appended.at(-1).content).toBe('第一段第二段')
   })
 
+  it('persists only referenced evidence and preserves its original number', async () => {
+    const appended: any[] = []
+    const evidence = Array.from({ length: 4 }, (_, index) => ({
+      documentId: `d${index + 1}`,
+      versionId: `v${index + 1}`,
+      chunkId: `c${index + 1}`,
+      title: `Document ${index + 1}`,
+      content: `Evidence ${index + 1}`,
+      score: 0.9 - index / 10,
+      metadata: {},
+    }))
+    const graph = createKnowledgeAgentGraph(undefined, {
+      retrieval: { search: async () => ({ sufficient: true, evidence }) } as any,
+      conversations: { recent: async () => [], summary: async () => undefined, append: async (value: any) => { appended.push(value); return value } } as any,
+      memories: { list: async () => [] } as any,
+      model: { streamChat: async function* () { yield '依据 [4] 和 [1] 回答。 [1]' } } as any,
+    })
+
+    await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r4', conversationId: 'c0', input: '请回答' })
+
+    expect(appended[0].citations).toHaveLength(2)
+    expect(appended[0].citations.map((citation: any) => citation.referenceIndex)).toEqual([1, 4])
+    expect(appended[0].citations.map((citation: any) => citation.chunkId)).toEqual(['c1', 'c4'])
+  })
+
   it('routes greetings directly to the answer node without retrieval', async () => {
     let retrievalCalls = 0
     const graph = createKnowledgeAgentGraph(undefined, {

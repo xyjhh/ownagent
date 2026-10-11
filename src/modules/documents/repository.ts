@@ -184,7 +184,7 @@ export class DocumentRepository {
   async list(context: DocumentContext, limit = 50) {
     const { data, error } = await this.db
       .from('knowledge_documents')
-      .select('id,title,content,visibility,metadata,created_at')
+      .select('id,title,content,visibility,metadata,status,original_filename,mime_type,file_size,created_at')
       .eq('workspace_id', context.workspaceId)
       .neq('status', 'deleted')
       .or(`visibility.eq.workspace,owner_id.eq.${context.userId}`)
