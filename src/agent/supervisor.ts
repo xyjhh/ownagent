@@ -24,8 +24,8 @@ export class SupervisorAgent {
 
   async classify(input: string, context: SupervisorContext): Promise<{ decision: SupervisorDecision; fallback: boolean }> {
     const trimmed = input.trim()
-    const rule = this.ruleDecision(trimmed)
-    if (rule) return { decision: rule, fallback: false }
+    const control = this.controlDecision(trimmed)
+    if (control) return { decision: control, fallback: false }
     const messages = [
       { role: 'system' as const, content: '你是企业知识库任务规划器。只能输出符合要求的 JSON。只能选择允许的 intent 和 plan，不能执行工具、决定权限或编造事实。不明确时选择只读 knowledge_query。涉及写操作时 requiresApproval 必须为 true。' },
       { role: 'user' as const, content: JSON.stringify({ input: trimmed, workspaceId: context.workspaceId, role: context.role ?? 'viewer', allowedPlans: ['search_knowledge', 'get_document', 'compare_documents', 'generate_answer'] }) },
@@ -39,10 +39,13 @@ export class SupervisorAgent {
     }
   }
 
-  private ruleDecision(input: string): SupervisorDecision | undefined {
+  private controlDecision(input: string): SupervisorDecision | undefined {
     if (!input) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1, reason: 'empty_input' }
-    if (/^(approve:|ask:|cancel$|stop$|继续$|拒绝$)/i.test(input)) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: input.startsWith('approve:'), confidence: 1, reason: 'control_input' }
-    if (/^(你好|嗨|hello|hi|谢谢|thanks)[!！。.]?$/i.test(input)) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1, reason: 'greeting' }
+    const lower = input.toLowerCase()
+    const isApproval = lower.startsWith('approve:')
+    const isQuestion = lower.startsWith('ask:')
+    const isControl = isApproval || isQuestion || new Set(['cancel', 'stop', '继续', '拒绝']).has(input)
+    if (isControl) return { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: isApproval, confidence: 1, reason: 'control_input' }
     return undefined
   }
 }

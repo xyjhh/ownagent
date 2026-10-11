@@ -156,13 +156,16 @@ async function processMessage(
         const nodeStarted = Date.now()
         await event(run.id, run.workspaceId, 'node_started', { node })
         const state = update as Record<string, unknown> | undefined
-        if (node === 'supervisor_plan' && state?.supervisorDecision) {
+        if (node === 'intent_recognition' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
           await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true })
-          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true })
           workerMetric('supervisorCalls')
           if (state.supervisorFallback === true) workerMetric('supervisorFallbacks')
           if (Number(decision.confidence) === 0) workerMetric('supervisorLowConfidence')
+        }
+        if (node === 'supervisor_plan' && state?.supervisorDecision) {
+          const decision = state.supervisorDecision as Record<string, unknown>
+          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true })
         }
         if (node === 'validate_plan' && state?.planRejected) { await event(run.id, run.workspaceId, 'plan_rejected', { reason: 'PLAN_VALIDATION_FAILED' }); workerMetric('planRejections') }
         if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_started', { mode: state?.retrieval && (state.retrieval as any).mode })
@@ -190,7 +193,8 @@ async function processMessage(
             : typeof state?.content === 'string'
               ? state.content
               : undefined
-        if (delta) {
+        if (typeof state?.answer === 'string') output = state.answer
+        if (delta && node === 'generate_answer_stream') {
           output = delta
           await event(run.id, run.workspaceId, 'token', { node, delta })
         }

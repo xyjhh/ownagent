@@ -181,9 +181,13 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     memories: deps.memories ? await deps.memories.list(state.workspaceId, state.userId) : [],
   }))
   graph.addNode('prefilter_input', async (state: KnowledgeAgentState) => ({ input: (state.input ?? '').slice(0, 4000) }))
-  graph.addNode('supervisor_plan', async (state: KnowledgeAgentState) => {
+  graph.addNode('intent_recognition', async (state: KnowledgeAgentState) => {
     const result = deps.supervisor ? await deps.supervisor.classify(state.input ?? '', { workspaceId: state.workspaceId, userId: state.userId }) : { decision: fallbackDecision(state.input ?? ''), fallback: true }
     return { supervisorDecision: result.decision, supervisorFallback: result.fallback, intent: result.decision.intent }
+  })
+  graph.addNode('supervisor_plan', async (state: KnowledgeAgentState) => {
+    const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
+    return { supervisorDecision: decision, intent: decision.intent }
   })
   graph.addNode('validate_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
@@ -234,15 +238,6 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     const result = await deps.model.chatJson([{ role: 'system', content: '请仅根据已授权文档输出 JSON 比较结果，不得编造引用。' }, { role: 'user', content: JSON.stringify({ documents: state.documentSources, request: state.input }) }], DocumentComparisonSchema)
     result.topics = result.topics.map(topic => ({ ...topic, citations: topic.citations.filter(c => valid.has(`${c.documentId}:${c.versionId}:${c.chunkId}`)) })); return { comparison: result, answer: `${result.conclusion}\n${result.topics.map(t => `${t.topic}: ${t.left} / ${t.right}`).join('\n')}`, citations: result.topics.flatMap(t => t.citations) }
   })
-  graph.addNode('build_prompt', async (state: KnowledgeAgentState) => ({
-    output: JSON.stringify({
-      summary: state.conversationSummary,
-      messages: state.recentMessages,
-      memories: state.memories,
-      evidence: state.evidence,
-      input: state.input,
-    }),
-  }))
   graph.addNode('generate_answer_stream', async (state: KnowledgeAgentState) => {
     if ((state.intent === 'document_summary' || state.intent === 'document_compare') && state.answer) return { output: state.answer }
     const citations = (state.evidence ?? []).map(e => ({
@@ -255,9 +250,22 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     }))
     if (!deps.model)
       return {
-        answer: state.evidence?.length ? state.evidence[0].content : '知识库中没有足够依据。',
+        answer: state.intent === 'general_chat'
+          ? '你好！我可以帮你查找和整理知识库中的内容。'
+          : state.evidence?.length ? state.evidence[0].content : '知识库中没有足够依据。',
         citations,
       }
+    if (state.intent === 'general_chat') {
+      let answer = ''
+      for await (const delta of deps.model.streamChat([
+        {
+          role: 'system',
+          content: '你是 OwnAgent 的对话助手。可以自然、简洁地回应问候和闲聊；用户需要知识库事实时，再根据已授权资料回答。',
+        },
+        { role: 'user', content: state.input ?? '' },
+      ])) answer += delta
+      return { answer, output: answer, citations: [] }
+    }
     const evidenceText = (state.evidence ?? [])
       .map((e, i) => `[${i + 1}] ${e.title}\n${e.content}`)
       .join('\n\n')
@@ -339,18 +347,57 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     }
     return {}
   })
-  graph.addEdge(START, 'load_context')
-  graph.addEdge('load_context', 'prefilter_input')
-  graph.addEdge('prefilter_input', 'supervisor_plan')
+  graph.addEdge(START, 'prefilter_input')
+  graph.addEdge('prefilter_input', 'intent_recognition')
+  graph.addEdge('intent_recognition', 'supervisor_plan')
   graph.addEdge('supervisor_plan', 'validate_plan')
   graph.addEdge('validate_plan', 'route_plan')
-  graph.addEdge('route_plan', 'retrieve_evidence')
-  graph.addEdge('retrieve_evidence', 'read_documents')
-  graph.addEdge('read_documents', 'summarize_document')
-  graph.addEdge('summarize_document', 'compare_documents')
-  graph.addEdge('compare_documents', 'build_prompt')
-  graph.addEdge('build_prompt', 'generate_answer_stream')
-  graph.addEdge('generate_answer_stream', 'extract_memory_candidates')
+  const needsDocumentRead = (state: KnowledgeAgentState) => {
+    const decision = state.supervisorDecision
+    return Boolean(
+      decision?.documentIds?.length ||
+      decision?.plan.includes('get_document') ||
+      decision?.plan.includes('compare_documents'),
+    )
+  }
+  const routeToWork = (state: KnowledgeAgentState) => {
+    const plan = state.supervisorDecision?.plan ?? []
+    if (plan.includes('search_knowledge')) return 'retrieve_evidence'
+    if (needsDocumentRead(state)) return 'read_documents'
+    return 'generate_answer_stream'
+  }
+  graph.addConditionalEdges('route_plan', (state: KnowledgeAgentState) =>
+    state.intent === 'general_chat' ? 'generate_answer_stream' : 'load_context', {
+    load_context: 'load_context',
+    generate_answer_stream: 'generate_answer_stream',
+  })
+  graph.addConditionalEdges('load_context', routeToWork, {
+    retrieve_evidence: 'retrieve_evidence',
+    read_documents: 'read_documents',
+    generate_answer_stream: 'generate_answer_stream',
+  })
+  graph.addConditionalEdges('retrieve_evidence', (state: KnowledgeAgentState) =>
+    needsDocumentRead(state) ? 'read_documents' : 'generate_answer_stream', {
+      read_documents: 'read_documents',
+      generate_answer_stream: 'generate_answer_stream',
+    })
+  graph.addConditionalEdges('read_documents', (state: KnowledgeAgentState) =>
+    state.intent === 'document_summary'
+      ? 'summarize_document'
+      : state.intent === 'document_compare'
+        ? 'compare_documents'
+        : 'generate_answer_stream', {
+          summarize_document: 'summarize_document',
+          compare_documents: 'compare_documents',
+          generate_answer_stream: 'generate_answer_stream',
+        })
+  graph.addEdge('summarize_document', 'generate_answer_stream')
+  graph.addEdge('compare_documents', 'generate_answer_stream')
+  graph.addConditionalEdges('generate_answer_stream', (state: KnowledgeAgentState) =>
+    state.intent === 'general_chat' ? 'persist_response' : 'extract_memory_candidates', {
+      persist_response: 'persist_response',
+      extract_memory_candidates: 'extract_memory_candidates',
+    })
   graph.addEdge('extract_memory_candidates', 'persist_response')
   graph.addEdge('persist_response', 'placeholder')
   graph.addEdge('placeholder', END)

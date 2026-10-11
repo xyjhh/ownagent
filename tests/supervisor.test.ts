@@ -2,12 +2,13 @@ import { describe, expect, it, vi } from 'vitest'
 import { SupervisorAgent, fallbackDecision } from '../src/agent/supervisor.js'
 
 describe('SupervisorAgent', () => {
-  it('uses rules for controls and greetings without calling the model', async () => {
-    const model = { chatJson: vi.fn() }
+  it('uses protocol checks only for controls and lets the model classify greetings', async () => {
+    const model = { chatJson: vi.fn().mockResolvedValue({ intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 0.99 }) }
     const supervisor = new SupervisorAgent(model as any)
     expect((await supervisor.classify('你好', { workspaceId: 'w', userId: 'u' })).decision.intent).toBe('general_chat')
+    expect(model.chatJson).toHaveBeenCalledTimes(1)
     expect((await supervisor.classify('approve: deploy', { workspaceId: 'w', userId: 'u' })).decision.requiresApproval).toBe(true)
-    expect(model.chatJson).not.toHaveBeenCalled()
+    expect(model.chatJson).toHaveBeenCalledTimes(1)
   })
   it('validates model output and falls back on low confidence or errors', async () => {
     const model = { chatJson: vi.fn().mockResolvedValue({ intent: 'knowledge_query', needsRetrieval: true, query: 'q', plan: ['search_knowledge', 'generate_answer'], requiresApproval: false, confidence: 0.9 }) }

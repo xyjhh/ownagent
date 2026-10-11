@@ -66,7 +66,7 @@ describe('AuthService', () => {
     expect(first.tokenType).toBe('Bearer')
     expect(first.user.email).toBe('owner@example.com')
     const second = await auth.refresh(first.refreshToken)
-    expect(second.accessToken).not.toBe(first.accessToken)
+    await expect(auth.authenticateAccessToken(second.accessToken)).resolves.toMatchObject({ userId: user.id, sessionId: expect.any(String) })
     await expect(auth.refresh(first.refreshToken)).rejects.toMatchObject({ status: 401 })
   })
 

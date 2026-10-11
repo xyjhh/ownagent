@@ -75,7 +75,9 @@ export class AuthService {
       expiresAt: new Date(Date.now() + this.refreshTokenSeconds * 1000).toISOString(),
       sessionId: record.sessionId ?? record.id,
     })
-    return this.issueTokenPair(user, nextRaw, nextId, record.familyId)
+    // The refresh-token row id changes on rotation, but the access token's
+    // session id must remain stable so authenticateAccessToken can validate it.
+    return this.issueTokenPair(user, nextRaw, record.sessionId ?? record.id, record.familyId)
   }
 
   async logout(refreshToken: string): Promise<void> {

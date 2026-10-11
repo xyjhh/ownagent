@@ -14,4 +14,21 @@ describe('knowledge graph', () => {
     expect(result.answer).toContain('SSO')
     expect(appended[0].citations[0]).toMatchObject({ documentId: 'd1', versionId: 'v1', chunkId: 'c1' })
   })
+
+  it('routes greetings directly to the answer node without retrieval', async () => {
+    let retrievalCalls = 0
+    const graph = createKnowledgeAgentGraph(undefined, {
+      retrieval: { search: async () => { retrievalCalls += 1; return { sufficient: true, evidence: [] } } } as any,
+      supervisor: { classify: async () => ({
+        decision: { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1 },
+        fallback: false,
+      }) } as any,
+      conversations: { recent: async () => [], summary: async () => undefined, append: async (value: any) => value } as any,
+      memories: { list: async () => [] } as any,
+      model: { streamChat: async function* () { yield '你好！' } } as any,
+    })
+    const result = await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r2', conversationId: 'c0', input: '你好' })
+    expect(result.answer).toBe('你好！')
+    expect(retrievalCalls).toBe(0)
+  })
 })
