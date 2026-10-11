@@ -44,7 +44,7 @@ export function createRunRouter(
             requestId: request.requestId,
           },
         })
-      const run = await service.create(request.workspace!, input.data, key)
+      const run = await service.create(request.workspace!, input.data, key, request.requestId)
       response.status(202).json({ run })
     } catch (error) {
       next(error)
@@ -64,7 +64,7 @@ export function createRunRouter(
   })
   router.post('/:workspaceId/runs/:runId/cancel', access, async (request, response, next) => {
     try {
-      const run = await service.cancel(request.workspace!, String(request.params.runId))
+      const run = await service.cancel(request.workspace!, String(request.params.runId), request.requestId)
       if (!run)
         return response.status(404).json({
           error: { code: 'NOT_FOUND', message: 'Run not found', requestId: request.requestId },
@@ -98,7 +98,9 @@ export function createRunRouter(
         String(request.params.runId),
         input.data.approvalId,
         input.data.value,
-        input.data.controlId ?? crypto.randomUUID()
+        input.data.controlId ?? crypto.randomUUID(),
+        undefined,
+        request.requestId
       )
       response.json({ run })
     } catch (error) {
@@ -130,7 +132,8 @@ export function createRunRouter(
         input.data.approvalId,
         false,
         input.data.controlId ?? crypto.randomUUID(),
-        input.data.reason
+        input.data.reason,
+        request.requestId
       )
       response.json({ run })
     } catch (error) {
@@ -150,7 +153,8 @@ export function createRunRouter(
         String(request.params.runId),
         'interrupt',
         { reason: input.reason ?? 'user_cancelled' },
-        input.controlId ?? String(crypto.randomUUID())
+        input.controlId ?? String(crypto.randomUUID()),
+        request.requestId
       )
       response.json({ run })
     } catch (error) {
@@ -180,7 +184,8 @@ export function createRunRouter(
         String(request.params.runId),
         'follow_up',
         { question: input.data.question },
-        input.data.controlId ?? String(crypto.randomUUID())
+        input.data.controlId ?? String(crypto.randomUUID()),
+        request.requestId
       )
       response.status(202).json({ run })
     } catch (error) {
@@ -193,7 +198,8 @@ export function createRunRouter(
       const events = await service.events(
         request.workspace!,
         String(request.params.runId),
-        Number.isFinite(afterSequence) ? afterSequence : 0
+        Number.isFinite(afterSequence) ? afterSequence : 0,
+        request.requestId
       )
       if (events === null)
         return response.status(404).json({

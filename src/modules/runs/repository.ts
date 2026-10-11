@@ -20,6 +20,13 @@ export class RunRepository {
     if (error) throw new Error(`Agent run creation failed: ${error.message}`)
     return this.toRun(data)
   }
+  async setTraceId(runId: string, traceId: string): Promise<void> {
+    const { error } = await this.db
+      .from('agent_runs')
+      .update({ langfuse_trace_id: traceId, updated_at: new Date().toISOString() })
+      .eq('id', runId)
+    if (error) throw new Error(`Agent trace update failed: ${error.message}`)
+  }
   async get(context: WorkspaceContext, runId: string): Promise<AgentRun | null> {
     const { data, error } = await this.db
       .from('agent_runs')

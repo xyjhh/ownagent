@@ -97,6 +97,10 @@ const schema = z.object({
     .string()
     .default('false')
     .transform(value => value === 'true'),
+  LANGFUSE_CAPTURE_CONTENT: z
+    .string()
+    .default('false')
+    .transform(value => value === 'true'),
   WS_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   WS_MAX_FRAME_BYTES: z.coerce.number().int().positive().max(2_000_000).default(256_000),
   WS_MAX_CONNECTIONS: z.coerce.number().int().positive().default(1_000),

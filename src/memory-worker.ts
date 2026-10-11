@@ -8,15 +8,17 @@ import { ConversationRepository } from './modules/conversations/repository.js'
 import { fallbackConversationTitle, normalizeConversationTitle, titlePrompt } from './modules/conversations/title.js'
 import { DeepSeekClient } from './integrations/deepseek.js'
 import { EmbeddingClient } from './integrations/embedding.js'
+import { LangfuseTracer, type TraceContext } from './observability/langfuse.js'
 import { z } from 'zod'
 
 const config = loadConfig()
+const tracer = new LangfuseTracer(config)
 const db = createSupabaseSchemaClient(createSupabaseAdmin(config), config.SUPABASE_DB_SCHEMA)
 const queue = new RedisStreams(config)
 const memories = new MemoryRepository(db)
 const conversations = new ConversationRepository(db)
-const model = new DeepSeekClient(config)
-const embedding = new EmbeddingClient(config)
+const model = new DeepSeekClient(config, tracer)
+const embedding = new EmbeddingClient(config, tracer)
 const consumer = `${process.env.HOSTNAME ?? 'memory'}-${randomUUID()}`
 const memoryStream = config.REDIS_STREAM_MEMORY ?? 'ownagent:memory-tasks'
 const memoryDeadLetter = config.REDIS_STREAM_MEMORY_DEAD_LETTER ?? 'ownagent:memory-dead-letter'
@@ -35,7 +37,7 @@ async function lease(message: StreamMessage, fn: () => Promise<void>) {
   const timer = setInterval(() => void queue.touch(memoryStream, config.REDIS_CONSUMER_GROUP, consumer, message.id).catch(() => undefined), Math.max(10_000, Math.floor(config.REDIS_RECLAIM_IDLE_MS / 3)))
   try { await fn() } finally { clearInterval(timer) }
 }
-async function execute(task: MemoryTask) {
+async function execute(task: MemoryTask, trace?: TraceContext) {
   const payload = task.payload as Record<string, any>
   if (task.taskType === 'persist_candidate') {
     if (!task.userId || !payload.candidate) throw new Error('INVALID_MEMORY_CANDIDATE_TASK')
@@ -49,7 +51,7 @@ async function execute(task: MemoryTask) {
     if (!task.memoryItemId) throw new Error('MEMORY_ITEM_REQUIRED')
     const item = await memories.get(task.memoryItemId, task.userId ?? '', task.workspaceId)
     if (!item || item.status !== 'active') return
-    const result = await embedding.embed(`${item.key}: ${item.summary}`)
+    const result = await embedding.embed(`${item.key}: ${item.summary}`, trace, 'memory.embedding')
     await memories.updateEmbedding(item.id, result.data[0]?.embedding ?? [], config.EMBEDDING_MODEL)
     return
   }
@@ -58,7 +60,7 @@ async function execute(task: MemoryTask) {
     const messages = await conversations.recent(task.conversationId, 50)
     if (messages.length < (config.CONVERSATION_SUMMARY_THRESHOLD ?? 30)) return
     if (!model.isConfigured()) throw new Error('MODEL_UNAVAILABLE')
-    const result = await model.chatJson([{ role: 'system', content: '请只根据对话生成简洁事实摘要，输出 JSON：{"summary":"..."}，不要添加对话外信息。' }, { role: 'user', content: JSON.stringify(messages.map(m => ({ role: m.role, content: m.content }))) }], summarySchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1 })
+    const result = await model.chatJson([{ role: 'system', content: '请只根据对话生成简洁事实摘要，输出 JSON：{"summary":"..."}，不要添加对话外信息。' }, { role: 'user', content: JSON.stringify(messages.map(m => ({ role: m.role, content: m.content }))) }], summarySchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1, trace, operation: 'memory.summarize_conversation' })
     await memories.upsertSummary(task.conversationId, result.summary, messages.at(-1)?.id, config.DEEPSEEK_MODEL)
     return
   }
@@ -74,7 +76,7 @@ async function execute(task: MemoryTask) {
         const result = await model.chatJson([
           { role: 'system', content: '你是会话标题生成器。只根据给定对话输出 JSON，格式必须是 {"title":"..."}。标题要简洁、具体、可扫描，长度约 6-18 个汉字或等价英文长度，跟随对话主要语言，不要添加引号、Markdown、前缀、句号或解释。' },
           { role: 'user', content: titlePrompt(messages) },
-        ], titleSchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1 })
+        ], titleSchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1, trace, operation: 'memory.update_title' })
         title = normalizeConversationTitle(result.title, fallback)
       } catch {
         title = fallback
@@ -88,7 +90,7 @@ async function execute(task: MemoryTask) {
     if (!task.memoryItemId || !task.userId || !model.isConfigured()) throw new Error('INVALID_MEMORY_REVIEW_TASK')
     const item = await memories.get(task.memoryItemId, task.userId, task.workspaceId)
     if (!item || item.status !== 'pending_confirmation') return
-    const decision = await model.chatJson([{ role: 'system', content: '你是记忆安全复核器。只能根据给定记忆判断是否为用户明确表达的、非敏感且可长期保存的信息。敏感信息不得批准。只输出 JSON。' }, { role: 'user', content: JSON.stringify({ summary: item.summary, type: item.type, sensitivity: item.sensitivity, value: item.value }) }], reviewSchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1 })
+    const decision = await model.chatJson([{ role: 'system', content: '你是记忆安全复核器。只能根据给定记忆判断是否为用户明确表达的、非敏感且可长期保存的信息。敏感信息不得批准。只输出 JSON。' }, { role: 'user', content: JSON.stringify({ summary: item.summary, type: item.type, sensitivity: item.sensitivity, value: item.value }) }], reviewSchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1, trace, operation: 'memory.review_candidate' })
     if (decision.approved && decision.confidence >= 0.85 && item.sensitivity === 'normal') {
       const activated = await memories.activateReviewed(item.id, task.userId, task.workspaceId, decision.confidence)
       if (activated && embeddingEnabled) await memories.enqueueTask({ workspaceId: task.workspaceId, userId: task.userId, memoryItemId: activated.id, taskType: 'embed_memory', payload: { memoryItemId: activated.id } })
@@ -100,7 +102,7 @@ async function execute(task: MemoryTask) {
     const scope = payload.scope === 'workspace' ? 'workspace' : 'user'
     const items = await memories.activeForScope(task.workspaceId, task.userId, scope)
     if (items.length < 2) return
-    const result = await model.chatJson([{ role: 'system', content: '你是长期记忆合并器。只能合并给定的同一权限范围记忆；不得发明事实。每个 key 最多输出一个结果，只输出 JSON。' }, { role: 'user', content: JSON.stringify(items.map(item => ({ id: item.id, key: item.key, type: item.type, value: item.value, summary: item.summary, confidence: item.confidence }))) }], consolidationSchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1 })
+    const result = await model.chatJson([{ role: 'system', content: '你是长期记忆合并器。只能合并给定的同一权限范围记忆；不得发明事实。每个 key 最多输出一个结果，只输出 JSON。' }, { role: 'user', content: JSON.stringify(items.map(item => ({ id: item.id, key: item.key, type: item.type, value: item.value, summary: item.summary, confidence: item.confidence }))) }], consolidationSchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1, trace, operation: 'memory.consolidate' })
     const byKey = new Map(items.map(item => [item.key, item]))
     for (const merged of result.merged) {
       const source = byKey.get(merged.key)
@@ -118,20 +120,31 @@ async function processMessage(message: StreamMessage) {
   if (!payload.taskId) return
   const task = await memories.claimTask(payload.taskId, consumer)
   if (!task) return
+  const trace = tracer.startTrace({ id: `memory-task-${task.id}-${task.attempt}`, name: 'memory-task', workspaceId: task.workspaceId, conversationId: task.conversationId, metadata: { taskId: task.id, runId: task.runId, taskType: task.taskType, attempt: task.attempt } })
+  const claimSpan = trace?.span('memory.claim', { taskId: task.id, runId: task.runId, attempt: task.attempt })
+  claimSpan?.end({ claimed: true })
+  const taskSpan = trace?.span(`memory.${task.taskType}`, { taskId: task.id, runId: task.runId, attempt: task.attempt })
   try {
-    await Promise.race([execute(task), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('MEMORY_TASK_TIMEOUT')), memoryTimeoutMs))])
+    await Promise.race([execute(task, trace?.context), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('MEMORY_TASK_TIMEOUT')), memoryTimeoutMs))])
     await memories.markTaskCompleted(task.id)
+    taskSpan?.end({ status: 'completed', taskType: task.taskType })
+    trace?.update({ status: 'completed', taskId: task.id, taskType: task.taskType })
   } catch (error) {
+    taskSpan?.fail(error, { taskId: task.id, taskType: task.taskType })
     const messageText = error instanceof Error ? error.message : 'MEMORY_TASK_FAILED'
     if (task.attempt < memoryMaxAttempts) {
       const delayMs = Math.min(60_000, 2 ** Math.max(0, task.attempt - 1) * 1000)
+      trace?.update({ status: 'retrying', taskId: task.id, taskType: task.taskType, attempt: task.attempt, error: messageText })
       await memories.retryTask(task.id, messageText, delayMs)
       await new Promise(resolve => setTimeout(resolve, delayMs))
       await queue.publish(memoryStream, { taskId: task.id })
     } else {
       await memories.deadLetterTask(task.id, messageText)
       await queue.publishToStream(memoryDeadLetter, { taskId: task.id, workspaceId: task.workspaceId, taskType: task.taskType, error: messageText, attempt: task.attempt })
+      trace?.update({ status: 'failed', taskId: task.id, taskType: task.taskType, error: messageText, deadLetter: true })
     }
+  } finally {
+    await tracer.flushAsync()
   }
 }
 function launch(message: StreamMessage) {
@@ -157,4 +170,5 @@ process.once('SIGTERM', shutdown); process.once('SIGINT', shutdown)
 await queue.ensureGroup(memoryStream)
 console.log(`ownagent memory worker ${consumer} listening on ${memoryStream}`)
 await loop()
+await tracer.shutdownAsync()
 await queue.close()

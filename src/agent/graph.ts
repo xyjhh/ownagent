@@ -14,6 +14,7 @@ import { SupervisorAgent, type SupervisorDecision, fallbackDecision } from './su
 import { z } from 'zod'
 import type { AnswerDeltaSink } from './answer-stream.js'
 import { selectCitationsFromAnswer } from './citations.js'
+import type { LangfuseTracer, TraceContext } from '../observability/langfuse.js'
 
 export const CitationSchema = z.object({ documentId: z.string().uuid().or(z.string().min(1)), versionId: z.string().uuid().or(z.string().min(1)), chunkId: z.string().uuid().or(z.string().min(1)), title: z.string().max(500), pageNumber: z.number().int().optional(), headingPath: z.array(z.string()).optional(), quote: z.string().max(2000).optional() })
 export const MemoryCandidateSchema = z.object({ scope: z.enum(['user', 'workspace']), type: z.enum(['preference', 'fact', 'instruction']), key: z.string().min(1).max(100), value: z.record(z.string(), z.unknown()), summary: z.string().min(1).max(500), confidence: z.number().min(0).max(1), sensitivity: z.enum(['normal', 'sensitive']), autoSave: z.boolean(), sourceMessageId: z.string().optional() })
@@ -91,6 +92,7 @@ export type KnowledgeAgentState = {
   workspaceId: string
   userId: string
   runId: string
+  traceContext?: TraceContext
   conversationId?: string
   input?: string
   intent?: UserIntent
@@ -122,6 +124,7 @@ export type KnowledgeGraphDeps = {
   documentTools?: DocumentTools
   retrievalMode?: RetrievalMode
   answerDeltaSink?: (context: { runId: string; workspaceId: string; node: 'generate_answer_stream' }) => AnswerDeltaSink | undefined
+  tracer?: LangfuseTracer
 }
 
 export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: KnowledgeGraphDeps = {}) {
@@ -130,6 +133,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       userId: { reducer: (_: string, v: string) => v, default: () => '' },
       workspaceId: { reducer: (_: string, v: string) => v, default: () => '' },
       runId: { reducer: (_: string, v: string) => v, default: () => '' },
+      traceContext: { reducer: (_: TraceContext | undefined, v: TraceContext | undefined) => v, default: () => undefined },
       conversationId: {
         reducer: (_: string | undefined, v: string | undefined) => v,
         default: () => undefined,
@@ -173,7 +177,21 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       retrieval: { reducer: (_: KnowledgeAgentState['retrieval'], v: KnowledgeAgentState['retrieval']) => v, default: () => undefined },
     },
   } as any)
-  graph.addNode('load_context', async (state: KnowledgeAgentState) => ({
+  const addObservedNode = (name: string, handler: (state: KnowledgeAgentState) => Promise<Record<string, unknown>>) => {
+    graph.addNode(name, async (state: KnowledgeAgentState) => {
+      const span = state.traceContext && deps.tracer?.startSpan(state.traceContext, `agent.node.${name}`, { node: name, input: summarizeNodeUpdate(state as unknown as Record<string, unknown>) })
+      try {
+        // Make model, retrieval, and tool observations children of this node.
+        const update = await handler(span ? { ...state, traceContext: span.context } : state)
+        span?.end(summarizeNodeUpdate(update))
+        return update
+      } catch (error) {
+        span?.fail(error, { node: name })
+        throw error
+      }
+    })
+  }
+  addObservedNode('load_context', async (state: KnowledgeAgentState) => ({
     recentMessages:
       deps.conversations && state.conversationId
         ? await deps.conversations.recent(state.conversationId, 12)
@@ -184,16 +202,16 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         : undefined,
     memories: deps.memories ? await deps.memories.list(state.workspaceId, state.userId) : [],
   }))
-  graph.addNode('prefilter_input', async (state: KnowledgeAgentState) => ({ input: (state.input ?? '').slice(0, 4000) }))
-  graph.addNode('intent_recognition', async (state: KnowledgeAgentState) => {
-    const result = deps.supervisor ? await deps.supervisor.classify(state.input ?? '', { workspaceId: state.workspaceId, userId: state.userId }) : { decision: fallbackDecision(state.input ?? ''), fallback: true }
+  addObservedNode('prefilter_input', async (state: KnowledgeAgentState) => ({ input: (state.input ?? '').slice(0, 4000) }))
+  addObservedNode('intent_recognition', async (state: KnowledgeAgentState) => {
+    const result = deps.supervisor ? await deps.supervisor.classify(state.input ?? '', { workspaceId: state.workspaceId, userId: state.userId, trace: state.traceContext }) : { decision: fallbackDecision(state.input ?? ''), fallback: true }
     return { supervisorDecision: result.decision, supervisorFallback: result.fallback, intent: result.decision.intent }
   })
-  graph.addNode('supervisor_plan', async (state: KnowledgeAgentState) => {
+  addObservedNode('supervisor_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
     return { supervisorDecision: decision, intent: decision.intent }
   })
-  graph.addNode('validate_plan', async (state: KnowledgeAgentState) => {
+  addObservedNode('validate_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
     const allowed = new Set(['search_knowledge', 'get_document', 'compare_documents', 'generate_answer'])
     const needsDocuments = Boolean(decision.documentIds?.length || decision.plan.includes('get_document') || decision.plan.includes('compare_documents'))
@@ -212,37 +230,37 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     }
     return valid ? {} : { supervisorDecision: fallbackDecision(state.input ?? ''), supervisorFallback: true, planRejected: true, intent: 'knowledge_query' }
   })
-  graph.addNode('route_plan', async (state: KnowledgeAgentState) => {
+  addObservedNode('route_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
     if (decision.requiresApproval) interrupt({ kind: 'approval', prompt: 'This action requires approval', options: [true, false] })
     return {}
   })
-  graph.addNode('retrieve_evidence', async (state: KnowledgeAgentState) => {
+  addObservedNode('retrieve_evidence', async (state: KnowledgeAgentState) => {
     if (!deps.retrieval || !state.supervisorDecision?.plan.includes('search_knowledge')) return { evidence: [] }
     const result = await deps.retrieval.search(
       { userId: state.userId, workspaceId: state.workspaceId, role: 'viewer' } as DocumentContext,
-      { query: state.supervisorDecision?.query ?? state.input ?? '', documentIds: state.supervisorDecision?.documentIds, limit: 8, mode: deps.retrievalMode ?? 'hybrid' }
+      { query: state.supervisorDecision?.query ?? state.input ?? '', documentIds: state.supervisorDecision?.documentIds, limit: 8, mode: deps.retrievalMode ?? 'hybrid', trace: state.traceContext }
     )
     return { evidence: result.evidence, retrieval: result.retrieval }
   })
-  graph.addNode('read_documents', async (state: KnowledgeAgentState) => {
+  addObservedNode('read_documents', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision
     if ((!deps.documents && !deps.documentTools) || !decision?.documentIds?.length || (!decision.plan.includes('get_document') && !decision.plan.includes('compare_documents'))) return { documentSources: [] }
     try { const context = { userId: state.userId, workspaceId: state.workspaceId, role: 'viewer' } as DocumentContext; return { documentSources: decision.plan.includes('compare_documents') ? (deps.documentTools ? await deps.documentTools.compareDocumentSources(context, decision.documentIds) : await deps.documents!.getComparisonSources(context, decision.documentIds)) : await Promise.all(decision.documentIds.map(id => deps.documentTools ? deps.documentTools.getDocument(context, id) : deps.documents!.getAuthorized(context, id))) } } catch { return { documentSources: [] } }
   })
-  graph.addNode('summarize_document', async (state: KnowledgeAgentState) => {
+  addObservedNode('summarize_document', async (state: KnowledgeAgentState) => {
     if (state.intent !== 'document_summary' || !deps.model || !state.documentSources?.length) return {}
     const source = state.documentSources[0]
-    const result = await deps.model.chatJson([{ role: 'system', content: '请仅根据提供的文档内容输出 JSON 摘要，不得编造引用。' }, { role: 'user', content: JSON.stringify({ title: source.title, versionId: source.versionId, chunks: source.chunks, request: state.input }) }], DocumentSummarySchema)
+    const result = await deps.model.chatJson([{ role: 'system', content: '请仅根据提供的文档内容输出 JSON 摘要，不得编造引用。' }, { role: 'user', content: JSON.stringify({ title: source.title, versionId: source.versionId, chunks: source.chunks, request: state.input }) }], DocumentSummarySchema, { trace: state.traceContext, operation: 'agent.document_summary' })
     const validIds = new Set(source.chunks.map(c => c.chunkId)); result.citations = result.citations.filter(c => c.documentId === source.documentId && c.versionId === source.versionId && validIds.has(c.chunkId)); return { summary: result, answer: result.summary, citations: result.citations }
   })
-  graph.addNode('compare_documents', async (state: KnowledgeAgentState) => {
+  addObservedNode('compare_documents', async (state: KnowledgeAgentState) => {
     if (state.intent !== 'document_compare' || !deps.model || !state.documentSources?.length) return {}
     const valid = new Set(state.documentSources.flatMap(s => s.chunks.map(c => `${s.documentId}:${s.versionId}:${c.chunkId}`)))
-    const result = await deps.model.chatJson([{ role: 'system', content: '请仅根据已授权文档输出 JSON 比较结果，不得编造引用。' }, { role: 'user', content: JSON.stringify({ documents: state.documentSources, request: state.input }) }], DocumentComparisonSchema)
+    const result = await deps.model.chatJson([{ role: 'system', content: '请仅根据已授权文档输出 JSON 比较结果，不得编造引用。' }, { role: 'user', content: JSON.stringify({ documents: state.documentSources, request: state.input }) }], DocumentComparisonSchema, { trace: state.traceContext, operation: 'agent.document_compare' })
     result.topics = result.topics.map(topic => ({ ...topic, citations: topic.citations.filter(c => valid.has(`${c.documentId}:${c.versionId}:${c.chunkId}`)) })); return { comparison: result, answer: `${result.conclusion}\n${result.topics.map(t => `${t.topic}: ${t.left} / ${t.right}`).join('\n')}`, citations: result.topics.flatMap(t => t.citations) }
   })
-  graph.addNode('generate_answer_stream', async (state: KnowledgeAgentState) => {
+  addObservedNode('generate_answer_stream', async (state: KnowledgeAgentState) => {
     if ((state.intent === 'document_summary' || state.intent === 'document_compare') && state.answer) return { output: state.answer }
     const evidenceCitations = (state.evidence ?? []).map(e => ({
       documentId: e.documentId,
@@ -268,7 +286,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
           content: '你是 OwnAgent 的对话助手。可以自然、简洁地回应问候和闲聊；用户需要知识库事实时，再根据已授权资料回答。',
         },
         { role: 'user', content: state.input ?? '' },
-      ])) {
+      ], { trace: state.traceContext, operation: 'agent.general_chat' })) {
         answer += delta
         await answerSink?.push(delta)
       }
@@ -289,22 +307,22 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         role: 'user',
         content: `历史摘要：${state.conversationSummary ?? ''}\n证据：\n${evidenceText}\n问题：${state.input ?? ''}`,
       },
-    ])) {
+    ], { trace: state.traceContext, operation: 'agent.answer' })) {
       answer += delta
       await answerSink?.push(delta)
     }
     await answerSink?.flush()
     return { answer, output: answer, citations: selectCitationsFromAnswer(answer, evidenceCitations) }
   })
-  graph.addNode('extract_memory_candidates', async (state: KnowledgeAgentState) => {
+  addObservedNode('extract_memory_candidates', async (state: KnowledgeAgentState) => {
     if (!deps.model || !state.input) return { memoryCandidates: [], requiresMemoryConfirmation: false }
     try {
-      const result = await deps.model.chatJson([{ role: 'system', content: '只提取用户明确表达的长期记忆候选，禁止推测。敏感信息和事实不得自动保存。只输出 JSON，顶层必须是 {"candidates":[]}；候选字段必须包含 scope、type、key、value、summary、confidence、sensitivity、autoSave。没有候选时输出 {"candidates":[]}。' }, { role: 'user', content: JSON.stringify({ input: state.input, sourceMessageId: undefined }) }], MemoryCandidatesSchema)
+      const result = await deps.model.chatJson([{ role: 'system', content: '只提取用户明确表达的长期记忆候选，禁止推测。敏感信息和事实不得自动保存。只输出 JSON，顶层必须是 {"candidates":[]}；候选字段必须包含 scope、type、key、value、summary、confidence、sensitivity、autoSave。没有候选时输出 {"candidates":[]}。' }, { role: 'user', content: JSON.stringify({ input: state.input, sourceMessageId: undefined }) }], MemoryCandidatesSchema, { trace: state.traceContext, operation: 'agent.memory_candidates' })
       const candidates: MemoryCandidate[] = result.candidates.map(c => ({ ...c, autoSave: c.autoSave && c.sensitivity === 'normal' && c.confidence >= 0.8 }))
       return { memoryCandidates: candidates, requiresMemoryConfirmation: candidates.some(c => !c.autoSave) }
     } catch { return { memoryCandidates: [], requiresMemoryConfirmation: false } }
   })
-  graph.addNode('persist_response', async (state: KnowledgeAgentState) => {
+  addObservedNode('persist_response', async (state: KnowledgeAgentState) => {
     let assistantMessageId: string | undefined
     if (deps.conversations && state.conversationId && state.answer)
       assistantMessageId = (await deps.conversations.append({
@@ -342,7 +360,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     // worker uses this update to publish citation events to live clients.
     return { output: state.answer, citations: state.citations ?? [] }
   })
-  graph.addNode('placeholder', async (state: KnowledgeAgentState) => {
+  addObservedNode('placeholder', async (state: KnowledgeAgentState) => {
     if (state.input?.toLowerCase().startsWith('approve:') && !state.requiresApproval) {
       interrupt({
         kind: 'approval',
@@ -416,4 +434,13 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
   graph.addEdge('persist_response', 'placeholder')
   graph.addEdge('placeholder', END)
   return graph.compile(checkpointer ? { checkpointer } : undefined)
+}
+
+function summarizeNodeUpdate(update: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(update).map(([key, value]) => {
+    if (Array.isArray(value)) return [key, { count: value.length }]
+    if (typeof value === 'string') return [key, { length: value.length }]
+    if (value && typeof value === 'object') return [key, { type: 'object' }]
+    return [key, value]
+  }))
 }

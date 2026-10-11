@@ -17,26 +17,26 @@ import { createServer } from 'node:http'
 import { RealtimeWebSocketServer } from './websocket.js'
 
 const config = loadConfig()
+const tracer = new LangfuseTracer(config)
 const db = createSupabaseAdmin(config)
 const schemaDb = createSupabaseSchemaClient(db, config.SUPABASE_DB_SCHEMA)
 const repository = new SupabaseAuthRepository(schemaDb)
 const auth = new AuthService(repository, config)
 const workspaceRepository = new WorkspaceRepository(schemaDb)
-const embedding = new EmbeddingClient(config)
-const reranker = new RerankerClient(config)
+const embedding = new EmbeddingClient(config, tracer)
+const reranker = new RerankerClient(config, tracer)
 const queue = new RedisStreams(config)
 const runRepository = new RunRepository(schemaDb)
 const runService = new RunService(runRepository, queue, {
   stream: config.REDIS_STREAM_AGENT,
   controlStream: config.REDIS_STREAM_CONTROLS,
   maxAttempts: config.WORKER_MAX_ATTEMPTS,
-})
+}, tracer)
 const outbox = new OutboxDispatcher(runRepository, queue, config.DATABASE_URL, {
   baseMs: config.REDIS_OUTBOX_RETRY_BASE_MS,
   maxMs: config.REDIS_OUTBOX_RETRY_MAX_MS,
-})
+}, tracer)
 outbox.start()
-const tracer = new LangfuseTracer(config)
 const health = new HealthService(config, schemaDb, undefined, undefined, undefined, queue, tracer)
 const app = createApp({
   config,
@@ -60,6 +60,7 @@ httpServer.listen(config.API_PORT, () => {
 const shutdown = async () => {
   await outbox.stop()
   httpServer.close()
+  await tracer.shutdownAsync()
   process.exit(0)
 }
 process.once('SIGINT', shutdown)

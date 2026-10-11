@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SupervisorAgent, fallbackDecision } from '../src/agent/supervisor.js'
+import { SupervisorAgent, fallbackDecision, supervisorDecisionSchema } from '../src/agent/supervisor.js'
 
 describe('SupervisorAgent', () => {
   it('uses protocol checks only for controls and lets the model classify greetings', async () => {
@@ -18,5 +18,23 @@ describe('SupervisorAgent', () => {
     expect((await supervisor.classify('未知问题', { workspaceId: 'w', userId: 'u' })).fallback).toBe(true)
     model.chatJson.mockRejectedValue(new Error('timeout'))
     expect((await supervisor.classify('另一个问题', { workspaceId: 'w', userId: 'u' })).decision).toEqual(fallbackDecision('另一个问题'))
+  })
+
+  it('normalizes safe model aliases before strict validation', () => {
+    expect(supervisorDecisionSchema.parse({
+      intent: 'qa',
+      needsRetrieval: 'true',
+      plan: ['retrieve', 'answer'],
+      requiresApproval: 'false',
+      confidence: '0.9',
+      query: null,
+      reason: null,
+    })).toMatchObject({
+      intent: 'knowledge_query',
+      needsRetrieval: true,
+      plan: ['search_knowledge', 'generate_answer'],
+      requiresApproval: false,
+      confidence: 0.9,
+    })
   })
 })

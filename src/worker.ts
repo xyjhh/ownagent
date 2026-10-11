@@ -26,11 +26,12 @@ const config = loadConfig()
 const db = createSupabaseSchemaClient(createSupabaseAdmin(config), config.SUPABASE_DB_SCHEMA)
 const repository = new RunRepository(db)
 const queue = new RedisStreams(config)
+const tracer = new LangfuseTracer(config)
 const conversations = new ConversationRepository(db)
 const memories = new MemoryRepository(db)
 const documents = new DocumentRepository(db)
-const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config), new RerankerClient(config), config.RETRIEVAL_MODE)
-const model = new DeepSeekClient(config)
+const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config, tracer), new RerankerClient(config, tracer), config.RETRIEVAL_MODE, tracer)
+const model = new DeepSeekClient(config, tracer)
 const answerStreams = new Map<string, AnswerDeltaBatcher>()
 function getAnswerDeltaSink(context: { runId: string; workspaceId: string; node: 'generate_answer_stream' }) {
   let sink = answerStreams.get(context.runId)
@@ -40,8 +41,7 @@ function getAnswerDeltaSink(context: { runId: string; workspaceId: string; node:
   }
   return sink
 }
-const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, retrievalMode: config.RETRIEVAL_MODE, documents, documentTools: new DocumentTools(documents), model, answerDeltaSink: getAnswerDeltaSink, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
-const tracer = new LangfuseTracer(config)
+const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, retrievalMode: config.RETRIEVAL_MODE, documents, documentTools: new DocumentTools(documents), model, tracer, answerDeltaSink: getAnswerDeltaSink, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
 const consumer = `${process.env.HOSTNAME ?? 'worker'}-${randomUUID()}`
 const controllers = new Map<string, AbortController>()
 const expiryTimer = setInterval(() => {
@@ -117,6 +117,7 @@ async function processMessage(
   if (!payload.runId) return 'skipped'
   const run = await repository.getById(payload.runId)
   if (!run || !(await repository.markRunning(run.id))) return 'skipped'
+  if (!run.traceId) await repository.setTraceId(run.id, run.id).catch(() => undefined)
   const started = Date.now()
   workerMetric('agentsStarted')
   const controller = new AbortController()
@@ -126,9 +127,18 @@ async function processMessage(
     name: 'knowledge-agent-run',
     userId: run.requestedBy,
     workspaceId: run.workspaceId,
+    conversationId: typeof run.input.conversationId === 'string' ? run.input.conversationId : undefined,
     model: config.DEEPSEEK_MODEL,
     promptVersion: 'v1',
+    metadata: { attempt: run.attempt + 1, consumer },
   })
+  const attemptSpan = trace?.span('agent.attempt', { attempt: run.attempt + 1, consumer, resumed: resumeValue !== undefined, resumeMode })
+  let attemptEnded = false
+  const endAttempt = (output: unknown, metadata?: Record<string, unknown>) => {
+    if (attemptEnded) return
+    attemptEnded = true
+    attemptSpan?.end(output, metadata)
+  }
   try {
     if (resumeValue === undefined && run.input.conversationId && typeof run.input.question === 'string') {
       await conversations.append({ conversationId: String(run.input.conversationId), workspaceId: run.workspaceId, userId: run.requestedBy, role: 'user', content: run.input.question })
@@ -145,6 +155,7 @@ async function processMessage(
             runId: run.id,
             input: initialInput ?? run.input.question,
             conversationId: run.input.conversationId,
+            traceContext: trace?.context,
           }
         : new Command({ resume: resumeValue })
     let output: string | undefined
@@ -238,12 +249,16 @@ async function processMessage(
         )
       } else await repository.markWaitingUser(run.id)
       workerMetric('agentsInterrupted')
+      trace?.update({ status: 'waiting', statusMessage: interrupt.kind === 'approval' ? 'waiting_approval' : 'waiting_user', attempt: run.attempt + 1 })
+      endAttempt(undefined, { status: 'waiting', interruptKind: interrupt.kind })
+      await tracer.flushAsync()
       return 'waiting'
     }
     await flushAnswerStream(run.id)
     await repository.markCompleted(run.id)
     await event(run.id, run.workspaceId, 'completed', { output: output ?? null })
-    trace?.update?.({ output: { status: 'completed' } })
+    trace?.update({ status: 'completed', output: { status: 'completed', answerLength: output?.length ?? 0 }, attempt: run.attempt + 1 })
+    endAttempt({ status: 'completed', answerLength: output?.length ?? 0 })
     workerMetric('agentsCompleted')
     return 'completed'
   } catch (error) {
@@ -252,6 +267,9 @@ async function processMessage(
       await repository.markInterrupted(run.id)
       await event(run.id, run.workspaceId, 'interrupt', { reason: 'user_cancelled' })
       workerMetric('agentsInterrupted')
+      trace?.update({ status: 'interrupted', statusMessage: 'user_cancelled', attempt: run.attempt + 1 })
+      endAttempt(undefined, { status: 'interrupted', reason: 'user_cancelled' })
+      await tracer.flushAsync()
       return 'interrupted'
     }
     const next = await repository.markFailed(
@@ -263,17 +281,25 @@ async function processMessage(
     if (next?.status === 'queued') {
       await repository.enqueueRetry(run.id, 2 ** Math.max(0, next.attempt - 1) * 1000)
       workerMetric('agentsRetried')
+      trace?.update({ status: 'retrying', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: next.attempt })
+      endAttempt(undefined, { status: 'retryable', error: error instanceof Error ? error.message : 'Agent run failed' })
+      await tracer.flushAsync()
       return 'retryable'
     }
     await event(run.id, run.workspaceId, 'failed', { code: 'AGENT_ERROR' })
     await deadLetter(run.id, message.id)
     workerMetric('agentsFailed')
+    trace?.update({ status: 'failed', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: run.attempt + 1 })
+    endAttempt(undefined, { status: 'failed', error: error instanceof Error ? error.message : 'Agent run failed' })
+    await tracer.flushAsync()
     return 'dead_lettered'
   } finally {
     await flushAnswerStream(run.id)
     answerStreams.delete(run.id)
     controllers.delete(run.id)
     workerMetric('totalAgentDurationMs', Date.now() - started)
+    if (!attemptEnded) endAttempt(undefined, { status: 'aborted' })
+    await tracer.flushAsync()
   }
 }
 
@@ -423,6 +449,7 @@ await Promise.all([
 await waitForTasks([...agents, ...controls], config.WORKER_SHUTDOWN_TIMEOUT_MS, () => {
   for (const c of controllers.values()) c.abort()
 })
+await tracer.shutdownAsync()
 console.log({ workerMetrics: workerMetricsSnapshot() }, 'worker stopped')
 clearInterval(expiryTimer)
 await queue.close()

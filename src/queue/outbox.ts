@@ -2,6 +2,7 @@ import type { RunRepository } from '../modules/runs/repository.js'
 import type { RedisStreams } from './redis-streams.js'
 import { Client } from 'pg'
 import { randomUUID } from 'node:crypto'
+import type { LangfuseTracer } from '../observability/langfuse.js'
 
 export class OutboxDispatcher {
   private running = false
@@ -19,7 +20,8 @@ export class OutboxDispatcher {
     private readonly repository: RunRepository,
     private readonly queue: RedisStreams,
     private readonly databaseUrl: string,
-    private readonly retry = { baseMs: 1_000, maxMs: 60_000 }
+    private readonly retry = { baseMs: 1_000, maxMs: 60_000 },
+    private readonly tracer?: LangfuseTracer
   ) {}
 
   start() {
@@ -97,9 +99,14 @@ export class OutboxDispatcher {
       const entries = await this.repository.claimOutbox(100, this.workerId)
       if (!entries.length) return
       for (const entry of entries) {
+        const span = this.tracer?.startSpan({ traceId: String(entry.run_id), runId: String(entry.run_id), workspaceId: String(entry.workspace_id) }, 'outbox.publish', {
+          stream: String(entry.stream), messageId: String(entry.id), runId: String(entry.run_id), attempts: Number(entry.attempts) || 0,
+        })
+        const started = Date.now()
         try {
           await this.queue.publish(String(entry.stream), entry.payload as Record<string, unknown>)
           await this.repository.markOutboxPublished(String(entry.id), this.workerId)
+          span?.end({ published: true, durationMs: Date.now() - started })
         } catch (error) {
           const rawMessage = error instanceof Error ? error.message : ''
           const message = /oom|maxmemory|out of memory/i.test(rawMessage)
@@ -113,6 +120,7 @@ export class OutboxDispatcher {
           await this.repository
             .releaseOutbox(String(entry.id), this.workerId, message, delayMs)
             .catch(() => undefined)
+          span?.fail(error, { published: false, durationMs: Date.now() - started, errorCode: message })
           this.scheduleRetry(delayMs)
         }
       }

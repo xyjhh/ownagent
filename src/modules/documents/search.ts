@@ -1,6 +1,7 @@
 import type { EmbeddingClient } from '../../integrations/embedding.js'
 import type { DocumentContext, SearchResult } from './types.js'
 import type { DocumentRepository } from './repository.js'
+import type { LangfuseTracer, TraceContext } from '../../observability/langfuse.js'
 
 export type RetrievalMode = 'vector' | 'hybrid'
 export type SearchExecutionMode = 'vector' | 'lexical' | 'hybrid' | 'none'
@@ -53,15 +54,21 @@ export async function retrieveCandidates(
   query: string,
   limit: number,
   mode: RetrievalMode,
+  trace?: TraceContext,
+  tracer?: LangfuseTracer,
 ): Promise<CandidateSearchResult> {
   const size = candidateLimit(limit)
   const lexicalPromise = mode === 'hybrid'
-    ? repository.searchLexical(context, query, size)
+    ? observedSearch(tracer, trace, 'retrieval.lexical_search', { queryLength: query.length, limit: size }, () => repository.searchLexical(context, query, size))
     : Promise.resolve([] as SearchResult[])
   const vectorPromise = (async () => {
-    const response = await embedding.embed(query)
-    const vectorSearch = repository.searchVector?.bind(repository) ?? repository.search.bind(repository)
-    return vectorSearch(context, response.data[0]?.embedding ?? [], size)
+    try {
+      const response = await embedding.embed(query, trace, 'retrieval.embedding')
+      const vectorSearch = repository.searchVector?.bind(repository) ?? repository.search.bind(repository)
+      return observedSearch(tracer, trace, 'retrieval.vector_search', { limit: size }, () => vectorSearch(context, response.data[0]?.embedding ?? [], size))
+    } catch (error) {
+      throw error
+    }
   })()
   const [lexical, vector] = await Promise.allSettled([lexicalPromise, vectorPromise])
   const lexicalResults = lexical.status === 'fulfilled' ? lexical.value : []
@@ -82,4 +89,16 @@ export async function retrieveCandidates(
         ? 'lexical'
         : 'none'
   return { results, mode: executionMode, vectorCount: vectorResults.length, lexicalCount: lexicalResults.length, failures }
+}
+
+async function observedSearch<T>(tracer: LangfuseTracer | undefined, trace: TraceContext | undefined, name: string, metadata: Record<string, unknown>, fn: () => Promise<T>) {
+  const span = trace && tracer?.startSpan(trace, name, metadata)
+  try {
+    const result = await fn()
+    span?.end(Array.isArray(result) ? { resultCount: result.length } : undefined)
+    return result
+  } catch (error) {
+    span?.fail(error)
+    throw error
+  }
 }
