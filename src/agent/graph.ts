@@ -12,6 +12,7 @@ import type { MemoryItem, MemoryRepository } from '../modules/memory/repository.
 import type { DeepSeekClient } from '../integrations/deepseek.js'
 import { SupervisorAgent, type SupervisorDecision, fallbackDecision } from './supervisor.js'
 import { z } from 'zod'
+import type { AnswerDeltaSink } from './answer-stream.js'
 
 export const CitationSchema = z.object({ documentId: z.string().uuid().or(z.string().min(1)), versionId: z.string().uuid().or(z.string().min(1)), chunkId: z.string().uuid().or(z.string().min(1)), title: z.string().max(500), pageNumber: z.number().int().optional(), headingPath: z.array(z.string()).optional(), quote: z.string().max(2000).optional() })
 export const MemoryCandidateSchema = z.object({ scope: z.enum(['user', 'workspace']), type: z.enum(['preference', 'fact', 'instruction']), key: z.string().min(1).max(100), value: z.record(z.string(), z.unknown()), summary: z.string().min(1).max(500), confidence: z.number().min(0).max(1), sensitivity: z.enum(['normal', 'sensitive']), autoSave: z.boolean(), sourceMessageId: z.string().optional() })
@@ -118,6 +119,7 @@ export type KnowledgeGraphDeps = {
   documents?: DocumentRepository
   documentTools?: DocumentTools
   retrievalMode?: RetrievalMode
+  answerDeltaSink?: (context: { runId: string; workspaceId: string; node: 'generate_answer_stream' }) => AnswerDeltaSink | undefined
 }
 
 export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: KnowledgeGraphDeps = {}) {
@@ -255,6 +257,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
           : state.evidence?.length ? state.evidence[0].content : '知识库中没有足够依据。',
         citations,
       }
+    const answerSink = deps.answerDeltaSink?.({ runId: state.runId, workspaceId: state.workspaceId, node: 'generate_answer_stream' })
     if (state.intent === 'general_chat') {
       let answer = ''
       for await (const delta of deps.model.streamChat([
@@ -263,7 +266,11 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
           content: '你是 OwnAgent 的对话助手。可以自然、简洁地回应问候和闲聊；用户需要知识库事实时，再根据已授权资料回答。',
         },
         { role: 'user', content: state.input ?? '' },
-      ])) answer += delta
+      ])) {
+        answer += delta
+        await answerSink?.push(delta)
+      }
+      await answerSink?.flush()
       return { answer, output: answer, citations: [] }
     }
     const evidenceText = (state.evidence ?? [])
@@ -280,8 +287,11 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         role: 'user',
         content: `历史摘要：${state.conversationSummary ?? ''}\n证据：\n${evidenceText}\n问题：${state.input ?? ''}`,
       },
-    ]))
+    ])) {
       answer += delta
+      await answerSink?.push(delta)
+    }
+    await answerSink?.flush()
     return { answer, output: answer, citations }
   })
   graph.addNode('extract_memory_candidates', async (state: KnowledgeAgentState) => {

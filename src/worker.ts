@@ -20,6 +20,7 @@ import { RerankerClient } from './integrations/reranker.js'
 import { DeepSeekClient } from './integrations/deepseek.js'
 import { SupervisorAgent } from './agent/supervisor.js'
 import { DocumentTools } from './agent/tools/documents.js'
+import { AnswerDeltaBatcher } from './agent/answer-stream.js'
 
 const config = loadConfig()
 const db = createSupabaseSchemaClient(createSupabaseAdmin(config), config.SUPABASE_DB_SCHEMA)
@@ -30,7 +31,16 @@ const memories = new MemoryRepository(db)
 const documents = new DocumentRepository(db)
 const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config), new RerankerClient(config), config.RETRIEVAL_MODE)
 const model = new DeepSeekClient(config)
-const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, retrievalMode: config.RETRIEVAL_MODE, documents, documentTools: new DocumentTools(documents), model, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
+const answerStreams = new Map<string, AnswerDeltaBatcher>()
+function getAnswerDeltaSink(context: { runId: string; workspaceId: string; node: 'generate_answer_stream' }) {
+  let sink = answerStreams.get(context.runId)
+  if (!sink) {
+    sink = new AnswerDeltaBatcher(delta => event(context.runId, context.workspaceId, 'token', { node: context.node, delta }))
+    answerStreams.set(context.runId, sink)
+  }
+  return sink
+}
+const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, retrievalMode: config.RETRIEVAL_MODE, documents, documentTools: new DocumentTools(documents), model, answerDeltaSink: getAnswerDeltaSink, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
 const tracer = new LangfuseTracer(config)
 const consumer = `${process.env.HOSTNAME ?? 'worker'}-${randomUUID()}`
 const controllers = new Map<string, AbortController>()
@@ -73,6 +83,13 @@ async function event(
 ) {
   const stored = await repository.appendEvent(runId, type, payload)
   await emit(runId, { type, runId, workspaceId, sequence: stored.sequence, ...payload })
+}
+async function flushAnswerStream(runId: string) {
+  try {
+    await answerStreams.get(runId)?.flush()
+  } catch {
+    workerMetric('eventPublishFailures')
+  }
 }
 async function deadLetter(runId: string, messageId: string) {
   const run = await repository.getById(runId)
@@ -192,9 +209,14 @@ async function processMessage(
             ? state.output
             : typeof state?.content === 'string'
               ? state.content
-              : undefined
+              : typeof state?.answer === 'string'
+                ? state.answer
+                : undefined
         if (typeof state?.answer === 'string') output = state.answer
-        if (delta && node === 'generate_answer_stream') {
+        // Model-backed answers are emitted by the per-run delta sink. Keep the
+        // single complete token event only for non-streaming fallback paths
+        // such as document summaries/comparisons and no-model responses.
+        if (delta && node === 'generate_answer_stream' && !answerStreams.has(run.id)) {
           output = delta
           await event(run.id, run.workspaceId, 'token', { node, delta })
         }
@@ -203,6 +225,7 @@ async function processMessage(
       }
     }
     if (interrupt) {
+      await flushAnswerStream(run.id)
       await event(run.id, run.workspaceId, 'interrupt', { interrupt })
       if (interrupt.kind === 'approval') {
         await repository.markWaitingApproval(run.id)
@@ -217,12 +240,14 @@ async function processMessage(
       workerMetric('agentsInterrupted')
       return 'waiting'
     }
+    await flushAnswerStream(run.id)
     await repository.markCompleted(run.id)
     await event(run.id, run.workspaceId, 'completed', { output: output ?? null })
     trace?.update?.({ output: { status: 'completed' } })
     workerMetric('agentsCompleted')
     return 'completed'
   } catch (error) {
+    await flushAnswerStream(run.id)
     if (controller.signal.aborted) {
       await repository.markInterrupted(run.id)
       await event(run.id, run.workspaceId, 'interrupt', { reason: 'user_cancelled' })
@@ -245,6 +270,8 @@ async function processMessage(
     workerMetric('agentsFailed')
     return 'dead_lettered'
   } finally {
+    await flushAnswerStream(run.id)
+    answerStreams.delete(run.id)
     controllers.delete(run.id)
     workerMetric('totalAgentDurationMs', Date.now() - started)
   }

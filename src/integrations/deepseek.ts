@@ -94,22 +94,33 @@ export class DeepSeekClient {
     let buffer = ''
     while (true) {
       const { done, value } = await reader.read()
-      if (done) break
+      if (done) {
+        buffer += decoder.decode()
+        break
+      }
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
-        if (!line.startsWith('data:')) continue
-        const data = line.slice(5).trim()
-        if (data === '[DONE]') return
-        try {
-          const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }
-          const text = chunk.choices?.[0]?.delta?.content
-          if (text) yield text
-        } catch {
-          /* skip malformed SSE frame */
-        }
+        const text = parseStreamLine(line)
+        if (text === null) continue
+        if (text === '[DONE]') return
+        if (text) yield text
       }
     }
+    const text = parseStreamLine(buffer)
+    if (text && text !== '[DONE]') yield text
+  }
+}
+
+function parseStreamLine(line: string): string | null {
+  if (!line.startsWith('data:')) return null
+  const data = line.slice(5).trim()
+  if (data === '[DONE]') return data
+  try {
+    const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> }
+    return chunk.choices?.[0]?.delta?.content ?? null
+  } catch {
+    return null
   }
 }
