@@ -24,7 +24,7 @@ export class AnswerDeltaBatcher implements AnswerDeltaSink {
 
   constructor(private readonly emit: AnswerDeltaEmitter, options: AnswerDeltaBatcherOptions = {}) {
     this.intervalMs = options.intervalMs ?? 50
-    this.maxChars = options.maxChars ?? 800
+    this.maxChars = options.maxChars ?? 240
     this.setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay))
     this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer))
   }

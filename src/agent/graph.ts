@@ -69,6 +69,7 @@ export type UserIntent =
   | 'document_summary'
   | 'document_compare'
   | 'general_chat'
+  | 'preference_update'
 export type Citation = {
   documentId: string
   versionId: string
@@ -240,10 +241,23 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
   })
   addObservedNode('supervisor_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
-    return { supervisorDecision: decision, intent: decision.intent }
+    return { supervisorDecision: decision, supervisorFallback: state.supervisorFallback === true, intent: decision.intent }
   })
   addObservedNode('validate_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
+    if (decision.preferenceOnly || decision.intent === 'preference_update') {
+      return {
+        supervisorDecision: {
+          ...decision,
+          intent: 'preference_update',
+          containsUserPreference: true,
+          preferenceOnly: true,
+          needsRetrieval: false,
+          plan: ['generate_answer'],
+        },
+        intent: 'preference_update',
+      }
+    }
     const clarificationRound = state.clarificationRound ?? 0
     if (decision.needsClarification && clarificationRound >= MAX_CLARIFICATION_ROUNDS) {
       const safeFallback = fallbackDecision(state.originalInput ?? state.input ?? '')
@@ -350,16 +364,39 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       return {
         answer: state.intent === 'general_chat'
           ? '你好！我可以帮你查找和整理知识库中的内容。'
+          : state.intent === 'preference_update'
+            ? '好的，我会在后续回答中优先遵循这个偏好。'
           : state.evidence?.length ? state.evidence[0].content : '知识库中没有足够依据。',
-        citations: state.evidence?.length ? [{ ...evidenceCitations[0], referenceIndex: 1 }] : [],
+        citations: state.intent === 'preference_update'
+          ? []
+          : state.evidence?.length ? [{ ...evidenceCitations[0], referenceIndex: 1 }] : [],
       }
     const answerSink = deps.answerDeltaSink?.({ runId: state.runId, workspaceId: state.workspaceId, node: 'generate_answer_stream' })
-    if (state.intent === 'general_chat') {
+    if (state.intent === 'preference_update') {
       let answer = ''
       for await (const delta of deps.model.streamChat([
         {
           role: 'system',
-          content: '你是 OwnAgent 的对话助手。可以自然、简洁地回应问候和闲聊；用户需要知识库事实时，再根据已授权资料回答。',
+          content: '你是 OwnAgent 的对话助手。用户刚刚表达了一个回答偏好，请用一句简短、自然的中文确认已记住该偏好。不要检索知识库，不要添加用户没有表达的新偏好。',
+        },
+        { role: 'user', content: state.input ?? '' },
+      ], { trace: state.traceContext, operation: 'agent.preference_update' })) {
+        answer += delta
+        await answerSink?.push(delta)
+      }
+      await answerSink?.flush()
+      return { answer, output: answer, citations: [] }
+    }
+    if (state.intent === 'general_chat') {
+      const preferences = (state.memories ?? [])
+        .filter(memory => memory.sensitivity === 'normal' && (memory.type === 'preference' || memory.type === 'instruction'))
+        .map(memory => memory.summary)
+      const preferenceContext = preferences.length ? `\n用户已保存的偏好：\n- ${preferences.join('\n- ')}` : ''
+      let answer = ''
+      for await (const delta of deps.model.streamChat([
+        {
+          role: 'system',
+          content: `你是 OwnAgent 的对话助手。可以自然、简洁地回应问候和闲聊；用户需要知识库事实时，再根据已授权资料回答。遵循下面提供的用户偏好，但不要向用户复述内部上下文。${preferenceContext}`,
         },
         { role: 'user', content: state.input ?? '' },
       ], { trace: state.traceContext, operation: 'agent.general_chat' })) {
@@ -372,6 +409,10 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     const evidenceText = (state.evidence ?? [])
       .map((e, i) => `[${i + 1}] ${e.title}\n${e.content}`)
       .join('\n\n')
+    const preferences = (state.memories ?? [])
+      .filter(memory => memory.sensitivity === 'normal' && (memory.type === 'preference' || memory.type === 'instruction'))
+      .map(memory => memory.summary)
+    const preferenceContext = preferences.length ? `用户已保存的偏好（用于调整表达方式，不作为事实证据）：\n- ${preferences.join('\n- ')}\n` : ''
     let answer = ''
     for await (const delta of deps.model.streamChat([
       {
@@ -381,7 +422,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       },
       {
         role: 'user',
-        content: `历史摘要：${state.conversationSummary ?? ''}\n证据：\n${evidenceText}\n问题：${state.input ?? ''}`,
+        content: `${preferenceContext}历史摘要：${state.conversationSummary ?? ''}\n证据：\n${evidenceText}\n问题：${state.input ?? ''}`,
       },
     ], { trace: state.traceContext, operation: 'agent.answer' })) {
       answer += delta
@@ -474,15 +515,13 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     if (needsDocumentRead(state)) return 'read_documents'
     return 'generate_answer_stream'
   }
-  graph.addConditionalEdges('route_plan', (state: KnowledgeAgentState) =>
-    state.intent === 'general_chat' ? 'generate_answer_stream' : 'load_context', {
+  graph.addEdge('route_plan', 'load_context')
+  graph.addConditionalEdges('load_context', (state: KnowledgeAgentState) =>
+    state.intent === 'general_chat' || state.intent === 'preference_update' ? 'generate_answer_stream' : routeToWork(state), {
     load_context: 'load_context',
     generate_answer_stream: 'generate_answer_stream',
-  })
-  graph.addConditionalEdges('load_context', routeToWork, {
     retrieve_evidence: 'retrieve_evidence',
     read_documents: 'read_documents',
-    generate_answer_stream: 'generate_answer_stream',
   })
   graph.addConditionalEdges('retrieve_evidence', (state: KnowledgeAgentState) =>
     needsDocumentRead(state) ? 'read_documents' : 'generate_answer_stream', {
@@ -501,11 +540,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         })
   graph.addEdge('summarize_document', 'generate_answer_stream')
   graph.addEdge('compare_documents', 'generate_answer_stream')
-  graph.addConditionalEdges('generate_answer_stream', (state: KnowledgeAgentState) =>
-    state.intent === 'general_chat' ? 'persist_response' : 'extract_memory_candidates', {
-      persist_response: 'persist_response',
-      extract_memory_candidates: 'extract_memory_candidates',
-    })
+  graph.addEdge('generate_answer_stream', 'extract_memory_candidates')
   graph.addEdge('extract_memory_candidates', 'persist_response')
   graph.addEdge('persist_response', 'placeholder')
   graph.addEdge('placeholder', END)

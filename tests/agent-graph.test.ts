@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Command, MemorySaver } from '@langchain/langgraph'
 import { createKnowledgeAgentGraph } from '../src/agent/graph.js'
+import { supervisorDecisionSchema } from '../src/agent/supervisor.js'
 
 describe('knowledge graph', () => {
   it('retrieves evidence, generates an answer and persists citations', async () => {
@@ -79,6 +80,76 @@ describe('knowledge graph', () => {
     expect(retrievalCalls).toBe(0)
   })
 
+  it('routes a preference-only input without retrieval and extracts the preference', async () => {
+    let retrievalCalls = 0
+    const memoryModelCalls: any[] = []
+    const persistedCandidates: any[] = []
+    const graph = createKnowledgeAgentGraph(undefined, {
+      retrieval: { search: async () => { retrievalCalls += 1; return { sufficient: true, evidence: [] } } } as any,
+      supervisor: { classify: async () => ({
+        decision: { intent: 'preference_update', needsRetrieval: true, plan: ['search_knowledge', 'generate_answer'], requiresApproval: false, confidence: 0.3, containsUserPreference: true, preferenceOnly: true },
+        fallback: false,
+      }) } as any,
+      conversations: { recent: async () => [], summary: async () => undefined, append: async (value: any) => value } as any,
+      memories: { list: async () => [], create: async (value: any) => { persistedCandidates.push(value); return {} } } as any,
+      model: {
+        streamChat: async function* () { yield '好的，后续示例会优先使用 TypeScript。' },
+        chatJson: async (messages: any[]) => {
+          memoryModelCalls.push(messages)
+          return { candidates: [{ scope: 'user', type: 'preference', key: 'answer_language', value: { language: 'TypeScript' }, summary: '示例优先使用 TypeScript', confidence: 0.95, sensitivity: 'normal', autoSave: true }] }
+        },
+      } as any,
+    })
+    const result = await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r-pref', input: '我主要用 TypeScript，示例尽量用 TypeScript' })
+    expect(retrievalCalls).toBe(0)
+    expect(result.answer).toContain('TypeScript')
+    expect(memoryModelCalls).toHaveLength(1)
+    expect(persistedCandidates).toHaveLength(1)
+    expect(persistedCandidates[0]).toMatchObject({ key: 'answer_language', status: 'active' })
+  })
+
+  it('extracts explicit preferences from mixed knowledge questions while still retrieving', async () => {
+    let retrievalCalls = 0
+    let memoryCalls = 0
+    const graph = createKnowledgeAgentGraph(undefined, {
+      retrieval: { search: async () => { retrievalCalls += 1; return { sufficient: true, evidence: [] } } } as any,
+      supervisor: { classify: async () => ({
+        decision: { intent: 'knowledge_query', needsRetrieval: true, plan: ['search_knowledge', 'generate_answer'], requiresApproval: false, confidence: 0.95, containsUserPreference: true, preferenceOnly: false },
+        fallback: false,
+      }) } as any,
+      conversations: { recent: async () => [], summary: async () => undefined, append: async (value: any) => value } as any,
+      memories: { list: async () => [], create: async () => ({}) } as any,
+      model: {
+        streamChat: async function* () { yield '这是文档说明。' },
+        chatJson: async () => { memoryCalls += 1; return { candidates: [] } },
+      } as any,
+    })
+    await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r-mixed', input: '我主要用 TypeScript，请解释这份文档中的实现' })
+    expect(retrievalCalls).toBe(1)
+    expect(memoryCalls).toBe(1)
+  })
+
+  it('runs memory extraction for ordinary general chat and tolerates memory extraction failures', async () => {
+    let memoryCalls = 0
+    let chatMessages: any[] = []
+    const graph = createKnowledgeAgentGraph(undefined, {
+      supervisor: { classify: async () => ({
+        decision: { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1 },
+        fallback: false,
+      }) } as any,
+      conversations: { recent: async () => [], summary: async () => undefined, append: async (value: any) => value } as any,
+      memories: { list: async () => [{ type: 'preference', sensitivity: 'normal', summary: '示例优先使用 TypeScript' }], create: async () => ({}) } as any,
+      model: {
+        streamChat: async function* (messages: any[]) { chatMessages = messages; yield '你好！' },
+        chatJson: async () => { memoryCalls += 1; throw new Error('memory model unavailable') },
+      } as any,
+    })
+    const result = await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r-chat', input: '你好' })
+    expect(result.answer).toBe('你好！')
+    expect(memoryCalls).toBe(1)
+    expect(chatMessages[0].content).toContain('示例优先使用 TypeScript')
+  })
+
   it('waits for clarification before retrieval and replans after the user responds', async () => {
     const saver = new MemorySaver()
     let classifyCalls = 0
@@ -109,5 +180,39 @@ describe('knowledge graph', () => {
     expect(classifyCalls).toBe(2)
     expect(retrievalCalls).toBe(1)
     expect(secondChunks.some(chunk => chunk.persist_response)).toBe(true)
+  })
+
+  it('uses a safe clarification prompt when the model returns an empty question', async () => {
+    const saver = new MemorySaver()
+    let retrievalCalls = 0
+    const decision = supervisorDecisionSchema.parse({
+      intent: 'knowledge_query',
+      needsRetrieval: true,
+      plan: ['search_knowledge', 'generate_answer'],
+      requiresApproval: false,
+      confidence: 0.9,
+      needsClarification: true,
+      clarificationQuestion: '',
+    })
+    const graph = createKnowledgeAgentGraph(saver, {
+      retrieval: { search: async () => { retrievalCalls += 1; return { sufficient: true, evidence: [] } } } as any,
+      supervisor: { classify: async () => ({ decision, fallback: false }) } as any,
+      conversations: { recent: async () => [], summary: async () => undefined, append: async (value: any) => value } as any,
+      memories: { list: async () => [] } as any,
+    })
+
+    const chunks: any[] = []
+    for await (const chunk of await graph.stream(
+      { workspaceId: 'w1', userId: 'u1', runId: 'r-clarification-empty', input: '帮我分析一下这份资料' },
+      { configurable: { thread_id: 'clarification-empty-thread' } },
+      { streamMode: 'updates' },
+    )) chunks.push(chunk)
+
+    const interrupt = chunks.find(chunk => chunk.__interrupt__)
+    expect(interrupt?.__interrupt__?.[0]?.value).toMatchObject({
+      kind: 'question',
+      question: '请补充你希望重点了解或分析的内容。',
+    })
+    expect(retrievalCalls).toBe(0)
   })
 })

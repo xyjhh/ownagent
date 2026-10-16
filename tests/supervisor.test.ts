@@ -59,13 +59,68 @@ describe('SupervisorAgent', () => {
       requiresApproval: false,
       confidence: 1,
     }).needsClarification).toBe(false)
-    expect(() => supervisorDecisionSchema.parse({
+    expect(supervisorDecisionSchema.parse({
       intent: 'knowledge_query',
       needsRetrieval: false,
       plan: ['generate_answer'],
       requiresApproval: false,
       confidence: 0.9,
       needsClarification: true,
-    })).toThrow()
+    })).toMatchObject({
+      needsClarification: true,
+      clarificationQuestion: '请补充你希望重点了解或分析的内容。',
+    })
+  })
+
+  it('keeps clarification pauses when the model returns an empty question', () => {
+    expect(supervisorDecisionSchema.parse({
+      intent: 'knowledge_query',
+      needsRetrieval: true,
+      plan: ['search_knowledge', 'generate_answer'],
+      requiresApproval: false,
+      confidence: 0.9,
+      needsClarification: true,
+      clarificationQuestion: '   ',
+      clarificationOptions: ['岗位职责', '', ' 岗位职责 '],
+    })).toMatchObject({
+      needsClarification: true,
+      clarificationQuestion: '请补充你希望重点了解或分析的内容。',
+      clarificationOptions: ['岗位职责'],
+    })
+  })
+
+  it('normalizes preference-only decisions into a non-retrieval route', () => {
+    expect(supervisorDecisionSchema.parse({
+      intent: 'general_chat',
+      needsRetrieval: true,
+      plan: ['search_knowledge', 'generate_answer'],
+      requiresApproval: false,
+      confidence: 0.2,
+      containsUserPreference: true,
+      preferenceOnly: true,
+    })).toMatchObject({
+      intent: 'preference_update',
+      needsRetrieval: false,
+      plan: ['generate_answer'],
+      containsUserPreference: true,
+      preferenceOnly: true,
+    })
+  })
+
+  it('does not replace an explicit preference-only decision with low-confidence retrieval fallback', async () => {
+    const model = { chatJson: vi.fn().mockResolvedValue({
+      intent: 'preference_update',
+      needsRetrieval: false,
+      plan: ['generate_answer'],
+      requiresApproval: false,
+      confidence: 0.2,
+      containsUserPreference: true,
+      preferenceOnly: true,
+    }) }
+    const supervisor = new SupervisorAgent(model as any)
+    const result = await supervisor.classify('我主要用 TypeScript，示例尽量用 TypeScript', { workspaceId: 'w', userId: 'u' })
+    expect(result.fallback).toBe(false)
+    expect(result.decision.intent).toBe('preference_update')
+    expect(result.decision.needsRetrieval).toBe(false)
   })
 })

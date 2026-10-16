@@ -34,4 +34,14 @@ describe('AnswerDeltaBatcher', () => {
     await batcher.flush()
     expect(emitted).toEqual([])
   })
+
+  it('uses a 240 character default batch threshold', async () => {
+    const emitted: string[] = []
+    const batcher = new AnswerDeltaBatcher(async delta => { emitted.push(delta) }, { intervalMs: 1000 })
+
+    await batcher.push('x'.repeat(239))
+    expect(emitted).toEqual([])
+    await batcher.push('x')
+    expect(emitted).toEqual(['x'.repeat(240)])
+  })
 })

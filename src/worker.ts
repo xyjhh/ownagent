@@ -189,14 +189,16 @@ async function processMessage(
         const state = update as Record<string, unknown> | undefined
         if (node === 'intent_recognition' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true })
+          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true })
+          trace?.event('preference.classified', { containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, intent: decision.intent, needsRetrieval: decision.needsRetrieval })
           workerMetric('supervisorCalls')
           if (state.supervisorFallback === true) workerMetric('supervisorFallbacks')
           if (Number(decision.confidence) === 0) workerMetric('supervisorLowConfidence')
         }
         if (node === 'supervisor_plan' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true })
+          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true })
+          trace?.event('preference.routing', { preferenceOnly: decision.preferenceOnly === true, needsRetrieval: decision.needsRetrieval, plan: decision.plan })
         }
         if (node === 'validate_plan' && state?.planRejected) { await event(run.id, run.workspaceId, 'plan_rejected', { reason: 'PLAN_VALIDATION_FAILED' }); workerMetric('planRejections') }
         if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_started', { mode: state?.retrieval && (state.retrieval as any).mode })
