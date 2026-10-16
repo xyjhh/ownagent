@@ -31,6 +31,7 @@ const config: AppConfig = {
 class FakeRepository implements AuthRepository {
   users = new Map<string, UserRecord>()
   tokens = new Map<string, RefreshTokenRecord>()
+  operations: string[] = []
   lastLogin = ''
   async findUserByEmail(email: string) { return [...this.users.values()].find(user => user.email === email) ?? null }
   async findUserById(id: string) { return this.users.get(id) ?? null }
@@ -42,11 +43,12 @@ class FakeRepository implements AuthRepository {
   async updateLastLogin(id: string, at: string) { this.lastLogin = id; const user = this.users.get(id)!; user.lastLoginAt = at }
   async findRefreshTokenByHash(hash: string) { return [...this.tokens.values()].find(token => token.tokenHash === hash) ?? null }
   async createRefreshToken(input: { id: string; familyId: string; userId: string; tokenHash: string; expiresAt: string }) {
+    this.operations.push(`create:${input.id}`)
     const record: RefreshTokenRecord = { ...input, revokedAt: null, replacedBy: null }
     this.tokens.set(record.id, record)
     return record
   }
-  async revokeRefreshToken(id: string, replacedBy?: string) { const token = this.tokens.get(id); if (!token || token.revokedAt) return false; token.revokedAt = new Date().toISOString(); token.replacedBy = replacedBy ?? null; return true }
+  async revokeRefreshToken(id: string, replacedBy?: string) { this.operations.push(`revoke:${id}`); const token = this.tokens.get(id); if (!token || token.revokedAt) return false; token.revokedAt = new Date().toISOString(); token.replacedBy = replacedBy ?? null; return true }
   async revokeRefreshTokenFamily(familyId: string) { for (const token of this.tokens.values()) if (token.familyId === familyId && !token.revokedAt) token.revokedAt = new Date().toISOString() }
 }
 
@@ -65,7 +67,10 @@ describe('AuthService', () => {
     const first = await auth.login(' OWNER@example.com ', 'correct-password')
     expect(first.tokenType).toBe('Bearer')
     expect(first.user.email).toBe('owner@example.com')
+    repository.operations = []
     const second = await auth.refresh(first.refreshToken)
+    expect(repository.operations[0]).toMatch(/^create:/)
+    expect(repository.operations[1]).toMatch(/^revoke:/)
     await expect(auth.authenticateAccessToken(second.accessToken)).resolves.toMatchObject({ userId: user.id, sessionId: expect.any(String) })
     await expect(auth.refresh(first.refreshToken)).rejects.toMatchObject({ status: 401 })
   })

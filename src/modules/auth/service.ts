@@ -62,11 +62,9 @@ export class AuthService {
 
     const nextId = randomUUID()
     const nextRaw = randomToken()
-    const replaced = await this.repository.revokeRefreshToken(record.id, nextId)
-    if (!replaced) {
-      await this.repository.revokeRefreshTokenFamily(record.familyId)
-      throw unauthorized('Invalid refresh token')
-    }
+    // `replaced_by` is a self-referencing foreign key. Insert the successor
+    // before pointing the current row at it, otherwise PostgreSQL rejects the
+    // update because the referenced row does not exist yet.
     await this.repository.createRefreshToken({
       id: nextId,
       familyId: record.familyId,
@@ -75,6 +73,11 @@ export class AuthService {
       expiresAt: new Date(Date.now() + this.refreshTokenSeconds * 1000).toISOString(),
       sessionId: record.sessionId ?? record.id,
     })
+    const replaced = await this.repository.revokeRefreshToken(record.id, nextId)
+    if (!replaced) {
+      await this.repository.revokeRefreshTokenFamily(record.familyId)
+      throw unauthorized('Invalid refresh token')
+    }
     // The refresh-token row id changes on rotation, but the access token's
     // session id must remain stable so authenticateAccessToken can validate it.
     return this.issueTokenPair(user, nextRaw, record.sessionId ?? record.id, record.familyId)
