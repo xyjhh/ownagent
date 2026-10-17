@@ -1,26 +1,12 @@
 import type { ConversationMessage } from '../conversations/repository.js'
+import { estimateTextTokens } from '../conversations/token-window.js'
 
 export const SUMMARY_PROMPT_VERSION = 'memory-worker-v2-incremental'
 
 export type SummaryMessage = Pick<ConversationMessage, 'id' | 'role' | 'content' | 'createdAt' | 'citations'>
 
-const chineseHanPattern = /[\u3400-\u4dbf\u4e00-\u9fff\u{20000}-\u{2fa1f}]/u
-const englishOrDigitPattern = /[A-Za-z0-9]/u
-const punctuationPattern = /[\p{P}\p{S}]/u
-
 /** Conservative, deterministic estimate used only for batching prompts. */
-export function estimateSummaryTokens(value: string): number {
-  let chinese = 0
-  let latinOrPunctuation = 0
-  let unsupported = 0
-  for (const character of Array.from(value)) {
-    if (chineseHanPattern.test(character)) chinese += 1
-    else if (/\s/u.test(character)) continue
-    else if (englishOrDigitPattern.test(character) || punctuationPattern.test(character)) latinOrPunctuation += 1
-    else unsupported += 1
-  }
-  return Math.max(1, chinese + Math.ceil(latinOrPunctuation / 4) + unsupported)
-}
+export const estimateSummaryTokens = estimateTextTokens
 
 export function summaryMessagePayload(message: SummaryMessage) {
   const citations = (message.citations ?? [])

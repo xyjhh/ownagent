@@ -15,6 +15,7 @@ import { z } from 'zod'
 import type { AnswerDeltaSink } from './answer-stream.js'
 import { selectCitationsFromAnswer } from './citations.js'
 import type { LangfuseTracer, TraceContext } from '../observability/langfuse.js'
+import { selectRecentMessagesByTokenBudget } from '../modules/conversations/token-window.js'
 
 const MAX_CLARIFICATION_ROUNDS = 2
 
@@ -112,6 +113,8 @@ export type KnowledgeAgentState = {
   conversationSummary?: string
   contextUsed?: boolean
   contextMessageCount?: number
+  contextTokenCount?: number
+  contextTruncated?: boolean
   hasConversationSummary?: boolean
   memories?: MemoryItem[]
   evidence?: Evidence[]
@@ -140,6 +143,7 @@ export type KnowledgeGraphDeps = {
   retrievalMode?: RetrievalMode
   answerDeltaSink?: (context: { runId: string; workspaceId: string; node: 'generate_answer_stream' }) => AnswerDeltaSink | undefined
   tracer?: LangfuseTracer
+  recentMessageTokenBudget?: number
 }
 
 export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: KnowledgeGraphDeps = {}) {
@@ -187,6 +191,8 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       },
       contextUsed: { reducer: (_: boolean, v: boolean) => v, default: () => false },
       contextMessageCount: { reducer: (_: number, v: number) => v, default: () => 0 },
+      contextTokenCount: { reducer: (_: number, v: number) => v, default: () => 0 },
+      contextTruncated: { reducer: (_: boolean, v: boolean) => v, default: () => false },
       hasConversationSummary: { reducer: (_: boolean, v: boolean) => v, default: () => false },
       memories: { reducer: (_: MemoryItem[], v: MemoryItem[]) => v, default: () => [] },
       evidence: { reducer: (_: Evidence[], v: Evidence[]) => v, default: () => [] },
@@ -231,9 +237,23 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     originalInput: state.originalInput ?? (state.input ?? '').slice(0, 4000),
   }))
   addObservedNode('load_conversation_context', async (state: KnowledgeAgentState) => {
-    const recentMessages = deps.conversations && state.conversationId
-      ? await deps.conversations.recent(state.conversationId, 8)
-      : []
+    const tokenBudget = deps.recentMessageTokenBudget ?? 4_000
+    let recentMessages: ConversationMessage[] = []
+    let contextTokenCount = 0
+    let contextTruncated = false
+    if (deps.conversations && state.conversationId) {
+      if (typeof deps.conversations.recentByTokenBudget === 'function') {
+        const window = await deps.conversations.recentByTokenBudget(state.conversationId, tokenBudget)
+        recentMessages = window.messages
+        contextTokenCount = window.estimatedTokens
+        contextTruncated = window.truncated
+      } else {
+        const fallback = selectRecentMessagesByTokenBudget(await deps.conversations.recent(state.conversationId, 100), tokenBudget)
+        recentMessages = fallback.messages
+        contextTokenCount = fallback.estimatedTokens
+        contextTruncated = fallback.truncated
+      }
+    }
     const conversationSummary = deps.conversations && state.conversationId
       ? await deps.conversations.summary(state.conversationId)
       : undefined
@@ -242,6 +262,8 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       conversationSummary,
       contextUsed: Boolean(state.conversationId && deps.conversations),
       contextMessageCount: recentMessages.length,
+      contextTokenCount,
+      contextTruncated,
       hasConversationSummary: Boolean(conversationSummary),
     }
   })
@@ -264,6 +286,8 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       intent: result.decision.intent,
       contextUsed: state.contextUsed === true,
       contextMessageCount: state.contextMessageCount ?? 0,
+      contextTokenCount: state.contextTokenCount ?? 0,
+      contextTruncated: state.contextTruncated === true,
       hasConversationSummary: state.hasConversationSummary === true,
     }
   })
@@ -278,6 +302,8 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       intent: decision.intent,
       contextUsed: state.contextUsed === true,
       contextMessageCount: state.contextMessageCount ?? 0,
+      contextTokenCount: state.contextTokenCount ?? 0,
+      contextTruncated: state.contextTruncated === true,
       hasConversationSummary: state.hasConversationSummary === true,
     }
   })

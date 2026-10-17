@@ -74,7 +74,7 @@ const schema = z.object({
   MEMORY_AUTO_SAVE_LOW_RISK: z.string().default('true').transform(value => value !== 'false'),
   MEMORY_CONFIRM_SENSITIVE: z.string().default('true').transform(value => value !== 'false'),
   MEMORY_MAX_ITEMS_PER_CONTEXT: z.coerce.number().int().positive().max(100).default(20),
-  CONVERSATION_RECENT_MESSAGES: z.coerce.number().int().positive().max(50).default(12),
+  CONVERSATION_RECENT_TOKENS: z.coerce.number().int().min(256).max(16_000).default(4_000),
   CONVERSATION_SUMMARY_THRESHOLD: z.coerce.number().int().positive().default(30),
   CONVERSATION_SUMMARY_INPUT_TOKENS: z.coerce.number().int().positive().default(6_000),
   CONVERSATION_SUMMARY_OUTPUT_TOKENS: z.coerce.number().int().positive().default(1_600),

@@ -41,7 +41,25 @@ function getAnswerDeltaSink(context: { runId: string; workspaceId: string; node:
   }
   return sink
 }
-const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), { conversations, memories, retrieval, retrievalMode: config.RETRIEVAL_MODE, documents, documentTools: new DocumentTools(documents), model, tracer, answerDeltaSink: getAnswerDeltaSink, supervisor: new SupervisorAgent(model, { confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD, maxRetries: config.SUPERVISOR_MAX_RETRIES, model: config.SUPERVISOR_MODEL, timeoutMs: config.SUPERVISOR_TIMEOUT_MS }) })
+const graph = createKnowledgeAgentGraph(await createPostgresCheckpointer(config), {
+  conversations,
+  memories,
+  retrieval,
+  retrievalMode: config.RETRIEVAL_MODE,
+  documents,
+  documentTools: new DocumentTools(documents),
+  model,
+  tracer,
+  answerDeltaSink: getAnswerDeltaSink,
+  recentMessageTokenBudget: config.CONVERSATION_RECENT_TOKENS,
+  supervisor: new SupervisorAgent(model, {
+    confidenceThreshold: config.SUPERVISOR_CONFIDENCE_THRESHOLD,
+    maxRetries: config.SUPERVISOR_MAX_RETRIES,
+    model: config.SUPERVISOR_MODEL,
+    timeoutMs: config.SUPERVISOR_TIMEOUT_MS,
+    recentTokenBudget: config.CONVERSATION_RECENT_TOKENS,
+  }),
+})
 const consumer = `${process.env.HOSTNAME ?? 'worker'}-${randomUUID()}`
 const controllers = new Map<string, AbortController>()
 const expiryTimer = setInterval(() => {
@@ -189,7 +207,7 @@ async function processMessage(
         const state = update as Record<string, unknown> | undefined
         if (node === 'intent_recognition' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), hasConversationSummary: state.hasConversationSummary === true, needsClarification: decision.needsClarification === true })
+          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), contextTokenCount: Number(state.contextTokenCount ?? 0), contextTruncated: state.contextTruncated === true, hasConversationSummary: state.hasConversationSummary === true, needsClarification: decision.needsClarification === true })
           trace?.event('preference.classified', { containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, intent: decision.intent, needsRetrieval: decision.needsRetrieval })
           workerMetric('supervisorCalls')
           if (state.supervisorFallback === true) workerMetric('supervisorFallbacks')
@@ -197,7 +215,7 @@ async function processMessage(
         }
         if (node === 'supervisor_plan' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, needsClarification: decision.needsClarification === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), hasConversationSummary: state.hasConversationSummary === true })
+          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, needsClarification: decision.needsClarification === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), contextTokenCount: Number(state.contextTokenCount ?? 0), contextTruncated: state.contextTruncated === true, hasConversationSummary: state.hasConversationSummary === true })
           trace?.event('preference.routing', { preferenceOnly: decision.preferenceOnly === true, needsRetrieval: decision.needsRetrieval, plan: decision.plan })
         }
         if (node === 'validate_plan' && state?.planRejected) { await event(run.id, run.workspaceId, 'plan_rejected', { reason: 'PLAN_VALIDATION_FAILED' }); workerMetric('planRejections') }

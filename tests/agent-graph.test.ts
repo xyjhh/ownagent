@@ -31,6 +31,43 @@ describe('knowledge graph', () => {
     expect(receivedContext.recentMessages[0].citations[0].title).toBe('简历')
   })
 
+  it('uses the token-bounded conversation window supplied by the repository', async () => {
+    let receivedContext: any
+    let requestedBudget = 0
+    const graph = createKnowledgeAgentGraph(undefined, {
+      recentMessageTokenBudget: 4000,
+      supervisor: {
+        classify: async (_input: string, context: any) => {
+          receivedContext = context
+          return {
+            decision: { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1 },
+            fallback: false,
+          }
+        },
+      } as any,
+      conversations: {
+        recentByTokenBudget: async (_conversationId: string, budget: number) => {
+          requestedBudget = budget
+          return {
+            messages: [{ id: 'm2', role: 'user', content: '最新问题', citations: [], createdAt: '2026-01-01T00:01:00Z' }],
+            estimatedTokens: 12,
+            messageCount: 1,
+            truncated: true,
+          }
+        },
+        summary: async () => undefined,
+        append: async (value: any) => value,
+      } as any,
+      memories: { list: async () => [] } as any,
+      model: { streamChat: async function* () { yield '好的' } } as any,
+    })
+
+    await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r-token-window', conversationId: 'c1', input: '继续' })
+    expect(requestedBudget).toBe(4000)
+    expect(receivedContext.recentMessages).toHaveLength(1)
+    expect(receivedContext.recentMessages[0].content).toBe('最新问题')
+  })
+
   it('retrieves evidence, generates an answer and persists citations', async () => {
     const appended: any[] = []
     const deltas: string[] = []

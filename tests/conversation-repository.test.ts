@@ -19,6 +19,7 @@ class QueryBuilder implements PromiseLike<{ data: any; error: null }> {
     })
     return this
   }
+  range(from: number, to: number) { this.selectedRows = this.selectedRows.slice(from, to + 1); return this }
   limit(value: number) { this.selectedRows = this.selectedRows.slice(0, value); return this }
   private result() {
     const rows = this.selectedRows.filter(row => this.filters.every(filter => filter(row)))
@@ -54,5 +55,17 @@ describe('conversation summary repository reads', () => {
       { id: 'm3', content: '第三条' },
     ])
     await expect(repository.summaryMessages('c1', 'missing')).resolves.toBeUndefined()
+  })
+
+  it('reads a recent conversation window by token budget', async () => {
+    const db = { from: (table: string) => new QueryBuilder(table === 'conversation_messages' ? [
+      ...rows,
+      { id: 'm4', conversation_id: 'c1', role: 'assistant', content: '第四条内容', citations: [], created_at: '2026-01-01T00:03:00.000Z' },
+    ] : []) }
+    const repository = new ConversationRepository(db as any)
+    const result = await repository.recentByTokenBudget('c1', 20)
+    expect(result.messages.at(-1)?.id).toBe('m4')
+    expect(result.messages.map(message => message.createdAt)).toEqual([...result.messages].map(message => message.createdAt).sort())
+    expect(result.estimatedTokens).toBeGreaterThan(0)
   })
 })

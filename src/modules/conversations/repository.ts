@@ -1,4 +1,5 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { selectRecentMessagesByTokenBudget, type TokenWindowResult } from './token-window.js'
 
 export type ConversationMessage = { id: string; role: 'user' | 'assistant' | 'system'; content: string; citations: Record<string, unknown>[]; createdAt: string }
 export type ConversationSummaryRecord = {
@@ -61,6 +62,26 @@ export class ConversationRepository {
     const { data, error } = await this.db.from('conversation_messages').select('id,role,content,citations,created_at').eq('conversation_id', conversationId).order('created_at', { ascending: false }).limit(limit)
     if (error) throw new Error(`Conversation history failed: ${error.message}`)
     return (data ?? []).reverse().map(row => ({ id: String(row.id), role: row.role as ConversationMessage['role'], content: String(row.content), citations: (row.citations ?? []) as Record<string, unknown>[], createdAt: String(row.created_at) }))
+  }
+  async recentByTokenBudget(conversationId: string, tokenBudget: number): Promise<TokenWindowResult> {
+    const pageSize = 50
+    const rows: Record<string, unknown>[] = []
+    let offset = 0
+    while (true) {
+      const { data, error } = await this.db
+        .from('conversation_messages')
+        .select('id,role,content,citations,created_at')
+        .eq('conversation_id', conversationId)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: false })
+        .range(offset, offset + pageSize - 1)
+      if (error) throw new Error(`Conversation token window lookup failed: ${error.message}`)
+      const page = data ?? []
+      rows.push(...page)
+      const window = selectRecentMessagesByTokenBudget(this.mapMessages(rows), tokenBudget)
+      if (window.truncated || page.length < pageSize) return window
+      offset += pageSize
+    }
   }
   async append(input: { conversationId: string; workspaceId: string; userId: string; role: ConversationMessage['role']; content: string; citations?: Record<string, unknown>[] }) {
     const { data, error } = await this.db.from('conversation_messages').insert({ conversation_id: input.conversationId, workspace_id: input.workspaceId, user_id: input.userId, role: input.role, content: input.content, citations: input.citations ?? [] }).select('id,role,content,citations,created_at').single()

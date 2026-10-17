@@ -1,6 +1,8 @@
 import { z, type ZodSchema } from 'zod'
 import type { DeepSeekClient } from '../integrations/deepseek.js'
 import type { TraceContext } from '../observability/langfuse.js'
+import type { ConversationMessage } from '../modules/conversations/repository.js'
+import { selectRecentMessagesByTokenBudget, truncateTextToTokenBudget } from '../modules/conversations/token-window.js'
 
 const supervisorIntentAliases: Record<string, string> = {
   knowledge: 'knowledge_query',
@@ -160,39 +162,34 @@ export type SupervisorContext = {
   trace?: TraceContext
 }
 
-const MAX_CONTEXT_MESSAGES = 8
-const MAX_CONTEXT_MESSAGE_LENGTH = 2000
-const MAX_CONTEXT_TOTAL_LENGTH = 12000
+const MAX_CONTEXT_MESSAGE_LENGTH = 12_000
+const MAX_CONTEXT_SUMMARY_TOKENS = 1_600
 
-function formatConversationContext(context: SupervisorContext) {
-  const summary = context.conversationSummary?.trim().slice(0, 4000) || undefined
-  let totalLength = summary?.length ?? 0
-  const normalizedMessages = (context.recentMessages ?? [])
-    .slice(-MAX_CONTEXT_MESSAGES)
-    .map(message => {
-      const content = String(message.content ?? '').trim().slice(0, MAX_CONTEXT_MESSAGE_LENGTH)
+function formatConversationContext(context: SupervisorContext, tokenBudget: number) {
+  const summary = context.conversationSummary?.trim()
+    ? truncateTextToTokenBudget(context.conversationSummary.trim(), MAX_CONTEXT_SUMMARY_TOKENS)
+    : undefined
+  const normalizedMessages: ConversationMessage[] = (context.recentMessages ?? [])
+    .map((message, index) => {
       const citations = (message.citations ?? [])
         .map(citation => typeof citation.title === 'string' ? citation.title.trim() : '')
         .filter(Boolean)
         .slice(0, 8)
       return {
+        id: `context-${index}`,
         role: message.role,
-        content,
-        ...(message.createdAt ? { createdAt: message.createdAt } : {}),
-        ...(citations.length ? { citations: citations.map(title => ({ title })) } : {}),
+        content: String(message.content ?? '').trim().slice(0, MAX_CONTEXT_MESSAGE_LENGTH),
+        createdAt: message.createdAt ?? '',
+        citations: citations.map(title => ({ title })),
       }
     })
-    .filter(message => message.content.length > 0)
-  const recentMessages = normalizedMessages
-    .slice()
-    .reverse()
-    .filter(message => {
-      const size = message.content.length
-      if (totalLength + size > MAX_CONTEXT_TOTAL_LENGTH) return false
-      totalLength += size
-      return true
-    })
-    .reverse()
+  const window = selectRecentMessagesByTokenBudget(normalizedMessages, tokenBudget)
+  const recentMessages = window.messages.map(message => ({
+    role: message.role,
+    content: message.content,
+    ...(message.createdAt ? { createdAt: message.createdAt } : {}),
+    ...(message.citations.length ? { citations: message.citations.map(citation => ({ title: typeof citation.title === 'string' ? citation.title : undefined })) } : {}),
+  }))
 
   return { conversationSummary: summary, recentMessages }
 }
@@ -220,7 +217,8 @@ export class SupervisorAgent {
       maxRetries: number
       model?: string
       timeoutMs?: number
-    } = { confidenceThreshold: 0.65, maxRetries: 1 }
+    recentTokenBudget?: number
+  } = { confidenceThreshold: 0.65, maxRetries: 1, recentTokenBudget: 4_000 }
   ) {}
 
   async classify(
@@ -230,7 +228,7 @@ export class SupervisorAgent {
     const trimmed = input.trim()
     const control = this.controlDecision(trimmed)
     if (control) return { decision: control, fallback: false }
-    const conversationContext = formatConversationContext(context)
+    const conversationContext = formatConversationContext(context, this.options.recentTokenBudget ?? 4_000)
     const messages = [
       {
         role: 'system' as const,
