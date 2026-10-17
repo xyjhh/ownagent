@@ -8,7 +8,6 @@ services:
       SUPABASE_URL: http://host.docker.internal:54321
       DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
       EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-      RERANK_URL: http://host.docker.internal:8001
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -27,7 +26,6 @@ services:
       SUPABASE_URL: http://host.docker.internal:54321
       DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
       EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-      RERANK_URL: http://host.docker.internal:8001
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -46,7 +44,6 @@ services:
       SUPABASE_URL: http://host.docker.internal:54321
       DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
       EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-      RERANK_URL: http://host.docker.internal:8001
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -63,7 +60,6 @@ services:
       SUPABASE_URL: http://host.docker.internal:54321
       DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
       EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-      RERANK_URL: http://host.docker.internal:8001
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

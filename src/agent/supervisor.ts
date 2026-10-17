@@ -69,7 +69,11 @@ function normalizeSupervisorDecision(value: unknown): unknown {
   }
   for (const key of ['query', 'reason', 'documentIds']) if (output[key] === null) delete output[key]
   if (typeof output.clarificationQuestion === 'string') {
-    output.clarificationQuestion = output.clarificationQuestion.trim()
+    const clarificationQuestion = output.clarificationQuestion.trim()
+    if (clarificationQuestion.length === 0) {
+      if (output.needsClarification === true) output.clarificationQuestion = DEFAULT_CLARIFICATION_QUESTION
+      else delete output.clarificationQuestion
+    } else output.clarificationQuestion = clarificationQuestion
   } else if (output.clarificationQuestion === null) {
     delete output.clarificationQuestion
   }

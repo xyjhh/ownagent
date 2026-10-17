@@ -19,11 +19,24 @@ const CAPACITY_WAKEUP_CHANNEL = 'ownagent:queue-capacity'
 
 export class RedisStreams {
   readonly client: Redis
+  private readonly blockingClients = new Map<string, Redis>()
+
   constructor(private readonly config: AppConfig) {
     this.client = new Redis(config.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 2 })
   }
+
   async connect() {
     if (this.client.status === 'wait') await this.client.connect()
+  }
+
+  private async blockingClient(stream: string) {
+    let client = this.blockingClients.get(stream)
+    if (!client) {
+      client = this.client.duplicate({ lazyConnect: true, maxRetriesPerRequest: 2 })
+      this.blockingClients.set(stream, client)
+    }
+    if (client.status === 'wait') await client.connect()
+    return client
   }
   async health(): Promise<'ok' | 'unavailable'> {
     try {
@@ -129,8 +142,8 @@ export class RedisStreams {
     count = 1,
     blockMs = 5000
   ): Promise<StreamMessage[]> {
-    await this.connect()
-    const result = (await this.client.xreadgroup(
+    const client = await this.blockingClient(stream)
+    const result = (await client.xreadgroup(
       'GROUP',
       group,
       consumer,
@@ -222,6 +235,10 @@ export class RedisStreams {
     }
   }
   async close() {
+    await Promise.all([...this.blockingClients.values()].map(async client => {
+      if (client.status !== 'end') await client.quit()
+    }))
+    this.blockingClients.clear()
     if (this.client.status !== 'end') await this.client.quit()
   }
 }

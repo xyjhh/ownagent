@@ -14,6 +14,32 @@ const config = {
 } as AppConfig
 
 describe('RedisStreams retention and acknowledgement', () => {
+  it('uses a dedicated Redis connection for blocking stream reads', async () => {
+    const queue = new RedisStreams(config)
+    const read = vi.fn().mockResolvedValue(null)
+    const blockingClient = { status: 'ready', xreadgroup: read } as any
+    const duplicate = vi.spyOn(queue.client, 'duplicate').mockReturnValue(blockingClient)
+    const mainRead = vi.spyOn(queue.client, 'xreadgroup')
+    Object.defineProperty(queue.client, 'status', { value: 'ready', configurable: true })
+
+    await queue.read('ownagent:agent-runs', 'ownagent-workers', 'worker-1', 1, 1000)
+
+    expect(duplicate).toHaveBeenCalledOnce()
+    expect(read).toHaveBeenCalledWith(
+      'GROUP',
+      'ownagent-workers',
+      'worker-1',
+      'COUNT',
+      1,
+      'BLOCK',
+      1000,
+      'STREAMS',
+      'ownagent:agent-runs',
+      '>'
+    )
+    expect(mainRead).not.toHaveBeenCalled()
+  })
+
   it('atomically acknowledges and deletes a task, then wakes the dispatcher', async () => {
     const queue = new RedisStreams(config)
     const exec = vi.fn().mockResolvedValue([[null, 1], [null, 1]])

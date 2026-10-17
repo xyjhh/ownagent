@@ -117,6 +117,18 @@ describe('SupervisorAgent', () => {
     })
   })
 
+  it('drops an empty clarification question when clarification is not needed', () => {
+    expect(supervisorDecisionSchema.parse({
+      intent: 'general_chat',
+      needsRetrieval: false,
+      plan: ['generate_answer'],
+      requiresApproval: false,
+      confidence: 0.9,
+      needsClarification: false,
+      clarificationQuestion: '   ',
+    })).not.toHaveProperty('clarificationQuestion')
+  })
+
   it('normalizes preference-only decisions into a non-retrieval route', () => {
     expect(supervisorDecisionSchema.parse({
       intent: 'general_chat',

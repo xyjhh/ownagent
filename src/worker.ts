@@ -33,6 +33,22 @@ const documents = new DocumentRepository(db)
 const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config, tracer), new RerankerClient(config, tracer), config.RETRIEVAL_MODE, tracer)
 const model = new DeepSeekClient(config, tracer)
 const answerStreams = new Map<string, AnswerDeltaBatcher>()
+type EventWriteStats = {
+  count: number
+  persistMs: number
+  publishMs: number
+  maxPersistMs: number
+  maxPublishMs: number
+  persistFailures: number
+  publishFailures: number
+}
+
+const eventStatsByRun = new Map<string, EventWriteStats>()
+
+function newEventWriteStats(): EventWriteStats {
+  return { count: 0, persistMs: 0, publishMs: 0, maxPersistMs: 0, maxPublishMs: 0, persistFailures: 0, publishFailures: 0 }
+}
+
 function getAnswerDeltaSink(context: { runId: string; workspaceId: string; node: 'generate_answer_stream' }) {
   let sink = answerStreams.get(context.runId)
   if (!sink) {
@@ -87,10 +103,19 @@ async function lease(
   }
 }
 async function emit(runId: string, event: AgentEvent) {
+  const stats = eventStatsByRun.get(runId)
+  const started = performance.now()
   try {
     await queue.publishEvent(runId, event)
   } catch {
     workerMetric('eventPublishFailures')
+    if (stats) stats.publishFailures += 1
+  } finally {
+    if (stats) {
+      const elapsed = performance.now() - started
+      stats.publishMs += elapsed
+      stats.maxPublishMs = Math.max(stats.maxPublishMs, elapsed)
+    }
   }
 }
 async function event(
@@ -99,8 +124,35 @@ async function event(
   type: AgentEventType,
   payload: Record<string, unknown>
 ) {
-  const stored = await repository.appendEvent(runId, type, payload)
+  const stats = eventStatsByRun.get(runId)
+  const started = performance.now()
+  let stored
+  try {
+    stored = await repository.appendEvent(runId, type, payload)
+  } catch (error) {
+    if (stats) stats.persistFailures += 1
+    throw error
+  } finally {
+    if (stats) {
+      const elapsed = performance.now() - started
+      stats.count += 1
+      stats.persistMs += elapsed
+      stats.maxPersistMs = Math.max(stats.maxPersistMs, elapsed)
+    }
+  }
   await emit(runId, { type, runId, workspaceId, sequence: stored.sequence, ...payload })
+}
+
+function eventStatsMetadata(stats: EventWriteStats) {
+  return {
+    eventCount: stats.count,
+    eventPersistMs: Math.round(stats.persistMs),
+    eventPublishMs: Math.round(stats.publishMs),
+    eventPersistMaxMs: Math.round(stats.maxPersistMs),
+    eventPublishMaxMs: Math.round(stats.maxPublishMs),
+    eventPersistFailures: stats.persistFailures,
+    eventPublishFailures: stats.publishFailures,
+  }
 }
 async function flushAnswerStream(runId: string) {
   try {
@@ -151,11 +203,13 @@ async function processMessage(
     metadata: { attempt: run.attempt + 1, consumer },
   })
   const attemptSpan = trace?.span('agent.attempt', { attempt: run.attempt + 1, consumer, resumed: resumeValue !== undefined, resumeMode })
+  const eventStats = newEventWriteStats()
+  eventStatsByRun.set(run.id, eventStats)
   let attemptEnded = false
   const endAttempt = (output: unknown, metadata?: Record<string, unknown>) => {
     if (attemptEnded) return
     attemptEnded = true
-    attemptSpan?.end(output, metadata)
+    attemptSpan?.end(output, { ...metadata, ...eventStatsMetadata(eventStats) })
   }
   try {
     if (resumeValue === undefined && run.input.conversationId && typeof run.input.question === 'string') {
@@ -285,7 +339,7 @@ async function processMessage(
         )
       } else await repository.markWaitingUser(run.id)
       workerMetric('agentsInterrupted')
-      trace?.update({ status: 'waiting', statusMessage: interrupt.kind === 'approval' ? 'waiting_approval' : 'waiting_user', attempt: run.attempt + 1 })
+      trace?.update({ status: 'waiting', statusMessage: interrupt.kind === 'approval' ? 'waiting_approval' : 'waiting_user', attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
       endAttempt(undefined, { status: 'waiting', interruptKind: interrupt.kind })
       await tracer.flushAsync()
       return 'waiting'
@@ -293,7 +347,7 @@ async function processMessage(
     await flushAnswerStream(run.id)
     await repository.markCompleted(run.id)
     await event(run.id, run.workspaceId, 'completed', { output: output ?? null })
-    trace?.update({ status: 'completed', output: { status: 'completed', answerLength: output?.length ?? 0 }, attempt: run.attempt + 1 })
+    trace?.update({ status: 'completed', output: { status: 'completed', answerLength: output?.length ?? 0 }, attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
     endAttempt({ status: 'completed', answerLength: output?.length ?? 0 })
     workerMetric('agentsCompleted')
     return 'completed'
@@ -303,7 +357,7 @@ async function processMessage(
       await repository.markInterrupted(run.id)
       await event(run.id, run.workspaceId, 'interrupt', { reason: 'user_cancelled' })
       workerMetric('agentsInterrupted')
-      trace?.update({ status: 'interrupted', statusMessage: 'user_cancelled', attempt: run.attempt + 1 })
+      trace?.update({ status: 'interrupted', statusMessage: 'user_cancelled', attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
       endAttempt(undefined, { status: 'interrupted', reason: 'user_cancelled' })
       await tracer.flushAsync()
       return 'interrupted'
@@ -317,7 +371,7 @@ async function processMessage(
     if (next?.status === 'queued') {
       await repository.enqueueRetry(run.id, 2 ** Math.max(0, next.attempt - 1) * 1000)
       workerMetric('agentsRetried')
-      trace?.update({ status: 'retrying', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: next.attempt })
+      trace?.update({ status: 'retrying', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: next.attempt, metadata: eventStatsMetadata(eventStats) })
       endAttempt(undefined, { status: 'retryable', error: error instanceof Error ? error.message : 'Agent run failed' })
       await tracer.flushAsync()
       return 'retryable'
@@ -325,7 +379,7 @@ async function processMessage(
     await event(run.id, run.workspaceId, 'failed', { code: 'AGENT_ERROR' })
     await deadLetter(run.id, message.id)
     workerMetric('agentsFailed')
-    trace?.update({ status: 'failed', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: run.attempt + 1 })
+    trace?.update({ status: 'failed', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
     endAttempt(undefined, { status: 'failed', error: error instanceof Error ? error.message : 'Agent run failed' })
     await tracer.flushAsync()
     return 'dead_lettered'
@@ -335,6 +389,7 @@ async function processMessage(
     controllers.delete(run.id)
     workerMetric('totalAgentDurationMs', Date.now() - started)
     if (!attemptEnded) endAttempt(undefined, { status: 'aborted' })
+    eventStatsByRun.delete(run.id)
     await tracer.flushAsync()
   }
 }
