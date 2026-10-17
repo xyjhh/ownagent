@@ -58,7 +58,33 @@ export class MemoryRepository {
   }
   async expire() { const { data, error } = await this.db.from('memory_items').update({ status: 'archived', updated_at: new Date().toISOString() }).eq('status', 'active').lt('expires_at', new Date().toISOString()).select('id'); if (error) throw new Error(`Memory expiry failed: ${error.message}`); return data?.length ?? 0 }
   async updateEmbedding(id: string, embedding: number[], model: string) { const { error } = await this.db.from('memory_items').update({ embedding: JSON.stringify(embedding), embedding_model: model, updated_at: new Date().toISOString() }).eq('id', id).eq('status', 'active'); if (error) throw new Error(`Memory embedding update failed: ${error.message}`) }
-  async upsertSummary(conversationId: string, summary: string, coveredUntilMessageId?: string, model?: string) { const { error } = await this.db.from('conversation_summaries').upsert({ conversation_id: conversationId, summary, covered_until_message_id: coveredUntilMessageId ?? null, model: model ?? null, prompt_version: 'memory-worker-v1', updated_at: new Date().toISOString() }); if (error) throw new Error(`Conversation summary write failed: ${error.message}`) }
+  async upsertSummary(conversationId: string, summary: string, coveredUntilMessageId?: string, model?: string) { const { error } = await this.db.from('conversation_summaries').upsert({ conversation_id: conversationId, summary, covered_until_message_id: coveredUntilMessageId ?? null, model: model ?? null, prompt_version: 'memory-worker-v2-incremental', updated_at: new Date().toISOString() }); if (error) throw new Error(`Conversation summary write failed: ${error.message}`) }
+  async saveSummaryIfUnchanged(input: { conversationId: string; summary: string; coveredUntilMessageId: string; model?: string; promptVersion?: string; expectedExists: boolean; expectedCoveredUntilMessageId?: string; expectedPointer: 'value' | 'null' | 'any' }) {
+    const payload = {
+      conversation_id: input.conversationId,
+      summary: input.summary,
+      covered_until_message_id: input.coveredUntilMessageId,
+      model: input.model ?? null,
+      prompt_version: input.promptVersion ?? 'memory-worker-v2-incremental',
+      updated_at: new Date().toISOString(),
+    }
+    if (!input.expectedExists) {
+      const { error } = await this.db.from('conversation_summaries').insert(payload)
+      if (!error) return true
+      if ((error as { code?: string }).code === '23505' || /duplicate|unique|already exists/i.test(error.message)) return false
+      throw new Error(`Conversation summary write failed: ${error.message}`)
+    }
+    let query = this.db
+      .from('conversation_summaries')
+      .update(payload)
+      .eq('conversation_id', input.conversationId)
+    if (input.expectedPointer === 'value' && input.expectedCoveredUntilMessageId)
+      query = query.eq('covered_until_message_id', input.expectedCoveredUntilMessageId)
+    else if (input.expectedPointer === 'null') query = query.is('covered_until_message_id', null)
+    const { data, error } = await query.select('conversation_id')
+    if (error) throw new Error(`Conversation summary conditional write failed: ${error.message}`)
+    return Array.isArray(data) && data.length > 0
+  }
   private mapTask(row: Record<string, unknown>): MemoryTask { return { id: String(row.id), taskType: row.task_type as MemoryTaskType, workspaceId: String(row.workspace_id), userId: row.user_id ? String(row.user_id) : undefined, conversationId: row.conversation_id ? String(row.conversation_id) : undefined, runId: row.run_id ? String(row.run_id) : undefined, memoryItemId: row.memory_item_id ? String(row.memory_item_id) : undefined, payload: (row.payload ?? {}) as Record<string, unknown>, attempt: Number(row.attempt ?? 0), status: String(row.status) } }
   async updateStatus(id: string, status: string, userId: string, workspaceId: string) { const { data, error } = await this.db.from('memory_items').update({ status, updated_at: new Date().toISOString() }).eq('id', id).eq('workspace_id', workspaceId).or(`owner_user_id.eq.${userId},scope.eq.workspace`).select('*').maybeSingle(); if (error) throw new Error(`Memory update failed: ${error.message}`); return data ? this.map(data) : null }
   async get(id: string, userId: string, workspaceId: string) { const { data, error } = await this.db.from('memory_items').select('*').eq('id', id).eq('workspace_id', workspaceId).or(`owner_user_id.eq.${userId},scope.eq.workspace`).maybeSingle(); if (error) throw new Error(`Memory lookup failed: ${error.message}`); return data ? this.map(data) : null }

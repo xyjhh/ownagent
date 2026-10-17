@@ -189,7 +189,7 @@ async function processMessage(
         const state = update as Record<string, unknown> | undefined
         if (node === 'intent_recognition' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true })
+          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), hasConversationSummary: state.hasConversationSummary === true, needsClarification: decision.needsClarification === true })
           trace?.event('preference.classified', { containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, intent: decision.intent, needsRetrieval: decision.needsRetrieval })
           workerMetric('supervisorCalls')
           if (state.supervisorFallback === true) workerMetric('supervisorFallbacks')
@@ -197,7 +197,7 @@ async function processMessage(
         }
         if (node === 'supervisor_plan' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true })
+          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, needsClarification: decision.needsClarification === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), hasConversationSummary: state.hasConversationSummary === true })
           trace?.event('preference.routing', { preferenceOnly: decision.preferenceOnly === true, needsRetrieval: decision.needsRetrieval, plan: decision.plan })
         }
         if (node === 'validate_plan' && state?.planRejected) { await event(run.id, run.workspaceId, 'plan_rejected', { reason: 'PLAN_VALIDATION_FAILED' }); workerMetric('planRejections') }

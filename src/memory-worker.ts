@@ -9,6 +9,7 @@ import { fallbackConversationTitle, normalizeConversationTitle, titlePrompt } fr
 import { DeepSeekClient } from './integrations/deepseek.js'
 import { EmbeddingClient } from './integrations/embedding.js'
 import { LangfuseTracer, type TraceContext } from './observability/langfuse.js'
+import { limitSummaryTokens, SUMMARY_PROMPT_VERSION, summaryPrompt, takeSummaryBatch } from './modules/memory/conversation-summary.js'
 import { z } from 'zod'
 
 const config = loadConfig()
@@ -29,7 +30,7 @@ const embeddingEnabled = config.MEMORY_EMBEDDING_ENABLED ?? true
 const active = new Set<Promise<void>>()
 let stopping = false
 
-const summarySchema = z.object({ summary: z.string().max(12000) })
+const summarySchema = z.object({ summary: z.string().trim().min(1).max(12000) })
 const titleSchema = z.object({ title: z.string().max(120) })
 const reviewSchema = z.object({ approved: z.boolean(), confidence: z.number().min(0).max(1), reason: z.string().max(500).optional() })
 const consolidationSchema = z.object({ merged: z.array(z.object({ key: z.string().min(1).max(100), type: z.enum(['preference', 'fact', 'instruction']), value: z.record(z.string(), z.unknown()), summary: z.string().max(500), confidence: z.number().min(0).max(1) })).max(100) })
@@ -37,7 +38,7 @@ async function lease(message: StreamMessage, fn: () => Promise<void>) {
   const timer = setInterval(() => void queue.touch(memoryStream, config.REDIS_CONSUMER_GROUP, consumer, message.id).catch(() => undefined), Math.max(10_000, Math.floor(config.REDIS_RECLAIM_IDLE_MS / 3)))
   try { await fn() } finally { clearInterval(timer) }
 }
-async function execute(task: MemoryTask, trace?: TraceContext) {
+async function execute(task: MemoryTask, trace?: TraceContext): Promise<Record<string, unknown> | undefined> {
   const payload = task.payload as Record<string, any>
   if (task.taskType === 'persist_candidate') {
     if (!task.userId || !payload.candidate) throw new Error('INVALID_MEMORY_CANDIDATE_TASK')
@@ -57,12 +58,70 @@ async function execute(task: MemoryTask, trace?: TraceContext) {
   }
   if (task.taskType === 'summarize_conversation') {
     if (!task.conversationId) throw new Error('CONVERSATION_REQUIRED')
-    const messages = await conversations.recent(task.conversationId, 50)
-    if (messages.length < (config.CONVERSATION_SUMMARY_THRESHOLD ?? 30)) return
     if (!model.isConfigured()) throw new Error('MODEL_UNAVAILABLE')
-    const result = await model.chatJson([{ role: 'system', content: '请只根据对话生成简洁事实摘要，输出 JSON：{"summary":"..."}，不要添加对话外信息。' }, { role: 'user', content: JSON.stringify(messages.map(m => ({ role: m.role, content: m.content }))) }], summarySchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1, trace, operation: 'memory.summarize_conversation' })
-    await memories.upsertSummary(task.conversationId, result.summary, messages.at(-1)?.id, config.DEEPSEEK_MODEL)
-    return
+    const inputBudget = config.CONVERSATION_SUMMARY_INPUT_TOKENS ?? 6_000
+    const outputBudget = config.CONVERSATION_SUMMARY_OUTPUT_TOKENS ?? 1_600
+    let writeRetries = 0
+    let batches = 0
+    let deltaMessages = 0
+    let estimatedInputTokens = 0
+    let finalCoveredUntilMessageId: string | undefined
+    while (writeRetries <= 2) {
+      const current = await conversations.summaryRecord(task.conversationId)
+      let messages = current
+        ? await conversations.summaryMessages(task.conversationId, current.coveredUntilMessageId)
+        : await conversations.summaryMessages(task.conversationId)
+      let previousSummary = current?.summary ?? ''
+      let expectedPointer: 'value' | 'null' | 'any' = current
+        ? current.coveredUntilMessageId ? 'value' : 'null'
+        : 'any'
+      if (messages === undefined) {
+        // A deleted checkpoint cannot safely identify the delta. Rebuild from
+        // the oldest available message and replace the stale summary.
+        messages = await conversations.summaryMessages(task.conversationId)
+        previousSummary = ''
+        expectedPointer = current?.coveredUntilMessageId ? 'value' : current ? 'null' : 'any'
+      }
+      if (!messages) return { summaryUpdated: false, reason: 'checkpoint_missing' }
+      if (!messages.length) return { summaryUpdated: false, reason: 'no_new_messages' }
+      if (!current && messages.length < (config.CONVERSATION_SUMMARY_THRESHOLD ?? 30)) return { summaryUpdated: false, reason: 'below_threshold' }
+
+      const batch = takeSummaryBatch(messages, previousSummary, inputBudget)
+      if (!batch.batch.length) return { summaryUpdated: false, reason: 'empty_batch' }
+      batches += 1
+      deltaMessages += batch.batch.length
+      estimatedInputTokens += batch.estimatedTokens
+      const result = await model.chatJson([
+        {
+          role: 'system',
+          content: `你是会话摘要合并器。只输出 JSON：{"summary":"..."}。将已有摘要与新增消息合并为完整、简洁、可审计的会话摘要。保留仍有效的事实、实体规范名称、用户偏好、回答要求、已解决结论、未解决问题、文档标题和引用关系；以最新消息纠正旧信息，删除明确被否定的信息。不要添加对话外事实、隐藏推理或模型过程。摘要目标不超过约 ${outputBudget} tokens。`,
+        },
+        { role: 'user', content: summaryPrompt(previousSummary, batch.batch) },
+      ], summarySchema, { model: config.DEEPSEEK_MODEL, timeoutMs: memoryTimeoutMs, maxRetries: 1, trace, operation: 'memory.summarize_conversation' })
+      const summary = limitSummaryTokens(result.summary, outputBudget)
+      const lastMessageId = batch.batch.at(-1)?.id
+      if (!lastMessageId) return
+      const saved = await memories.saveSummaryIfUnchanged({
+        conversationId: task.conversationId,
+        summary,
+        coveredUntilMessageId: lastMessageId,
+        model: config.DEEPSEEK_MODEL,
+        promptVersion: SUMMARY_PROMPT_VERSION,
+        expectedExists: Boolean(current),
+        expectedCoveredUntilMessageId: expectedPointer === 'value' ? current?.coveredUntilMessageId : undefined,
+        expectedPointer,
+      })
+      if (!saved) {
+        writeRetries += 1
+        continue
+      }
+      finalCoveredUntilMessageId = lastMessageId
+      // Process another token-bounded batch in the same task. Re-reading the
+      // record also makes the next batch use the persisted checkpoint.
+      if (batch.remaining.length) continue
+      return { summaryUpdated: true, batches, deltaMessages, estimatedInputTokens, summaryLength: summary.length, finalCoveredUntilMessageId }
+    }
+    throw new Error(`SUMMARY_CONCURRENT_UPDATE after ${writeRetries} retries`)
   }
   if (task.taskType === 'update_conversation_title') {
     if (!task.conversationId) throw new Error('CONVERSATION_REQUIRED')
@@ -125,9 +184,9 @@ async function processMessage(message: StreamMessage) {
   claimSpan?.end({ claimed: true })
   const taskSpan = trace?.span(`memory.${task.taskType}`, { taskId: task.id, runId: task.runId, attempt: task.attempt })
   try {
-    await Promise.race([execute(task, trace?.context), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('MEMORY_TASK_TIMEOUT')), memoryTimeoutMs))])
+    const execution = await Promise.race([execute(task, trace?.context), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('MEMORY_TASK_TIMEOUT')), memoryTimeoutMs))])
     await memories.markTaskCompleted(task.id)
-    taskSpan?.end({ status: 'completed', taskType: task.taskType })
+    taskSpan?.end({ status: 'completed', taskType: task.taskType, ...(execution ?? {}) })
     trace?.update({ status: 'completed', taskId: task.id, taskType: task.taskType })
   } catch (error) {
     taskSpan?.fail(error, { taskId: task.id, taskType: task.taskType })

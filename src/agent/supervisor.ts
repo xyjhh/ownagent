@@ -150,7 +150,51 @@ export type SupervisorContext = {
   workspaceId: string
   userId: string
   role?: string
+  conversationSummary?: string
+  recentMessages?: Array<{
+    role: 'user' | 'assistant' | 'system'
+    content: string
+    createdAt?: string
+    citations?: Array<{ title?: string }>
+  }>
   trace?: TraceContext
+}
+
+const MAX_CONTEXT_MESSAGES = 8
+const MAX_CONTEXT_MESSAGE_LENGTH = 2000
+const MAX_CONTEXT_TOTAL_LENGTH = 12000
+
+function formatConversationContext(context: SupervisorContext) {
+  const summary = context.conversationSummary?.trim().slice(0, 4000) || undefined
+  let totalLength = summary?.length ?? 0
+  const normalizedMessages = (context.recentMessages ?? [])
+    .slice(-MAX_CONTEXT_MESSAGES)
+    .map(message => {
+      const content = String(message.content ?? '').trim().slice(0, MAX_CONTEXT_MESSAGE_LENGTH)
+      const citations = (message.citations ?? [])
+        .map(citation => typeof citation.title === 'string' ? citation.title.trim() : '')
+        .filter(Boolean)
+        .slice(0, 8)
+      return {
+        role: message.role,
+        content,
+        ...(message.createdAt ? { createdAt: message.createdAt } : {}),
+        ...(citations.length ? { citations: citations.map(title => ({ title })) } : {}),
+      }
+    })
+    .filter(message => message.content.length > 0)
+  const recentMessages = normalizedMessages
+    .slice()
+    .reverse()
+    .filter(message => {
+      const size = message.content.length
+      if (totalLength + size > MAX_CONTEXT_TOTAL_LENGTH) return false
+      totalLength += size
+      return true
+    })
+    .reverse()
+
+  return { conversationSummary: summary, recentMessages }
 }
 
 export function fallbackDecision(input: string): SupervisorDecision {
@@ -186,11 +230,13 @@ export class SupervisorAgent {
     const trimmed = input.trim()
     const control = this.controlDecision(trimmed)
     if (control) return { decision: control, fallback: false }
+    const conversationContext = formatConversationContext(context)
     const messages = [
       {
         role: 'system' as const,
         content:
-          '你是企业知识库任务规划器。只输出一个合法 JSON 对象，不要 Markdown、代码围栏、解释或额外字段。输出格式示例：{"intent":"knowledge_query","needsRetrieval":true,"query":"问题改写，可选","documentIds":[],"plan":["search_knowledge","generate_answer"],"requiresApproval":false,"confidence":0.9,"reason":"可选简短原因","needsClarification":false,"clarificationQuestion":"可选的面向用户的问题","clarificationOptions":[],"containsUserPreference":false,"preferenceOnly":false}。intent 只能是 knowledge_query、document_summary、document_compare、general_chat、preference_update；preference_update 只用于用户明确表达偏好、习惯或回答格式要求。用户偏好字段：containsUserPreference 表示输入是否包含长期偏好，preferenceOnly 表示整条输入只有偏好且不需要知识库回答。preferenceOnly=true 时必须使用 intent=preference_update、needsRetrieval=false、plan=["generate_answer"]，不得检索知识库。偏好与知识问题同时出现时，containsUserPreference=true 但 preferenceOnly=false，保留知识问题的检索计划。用户明确表达“我主要用 TypeScript”“以后示例尽量用 TypeScript”属于偏好，不要当作知识库问题。不明确时选择只读 knowledge_query。信息不足以安全执行时或者根据上下文无法判断用户需要的信息时设置 needsClarification=true，提供简短的 clarificationQuestion；存在有限选择时提供最多 6 个 clarificationOptions，不要猜测用户未提供的信息。只能选择允许的 intent 和 plan，不能执行工具、决定权限或编造事实。涉及写操作时 requiresApproval 必须为 true。',
+          '你是企业知识库任务规划器。只输出一个合法 JSON 对象，不要 Markdown、代码围栏、解释或额外字段。输出格式示例：{"intent":"knowledge_query","needsRetrieval":true,"query":"问题改写，可选","documentIds":[],"plan":["search_knowledge","generate_answer"],"requiresApproval":false,"confidence":0.9,"reason":"可选简短原因","needsClarification":false,"clarificationQuestion":"可选的面向用户的问题","clarificationOptions":[],"containsUserPreference":false,"preferenceOnly":false}。intent 只能是 knowledge_query、document_summary、document_compare、general_chat、preference_update；preference_update 只用于用户明确表达偏好、习惯或回答格式要求。用户偏好字段：containsUserPreference 表示输入是否包含长期偏好，preferenceOnly 表示整条输入只有偏好且不需要知识库回答。preferenceOnly=true 时必须使用 intent=preference_update、needsRetrieval=false、plan=["generate_answer"]，不得检索知识库。偏好与知识问题同时出现时，containsUserPreference=true 但 preferenceOnly=false，保留知识问题的检索计划。用户明确表达“我主要用 TypeScript”“以后示例尽量用 TypeScript”属于偏好，不要当作知识库问题。不明确时选择只读 knowledge_query。信息不足以安全执行时或者根据上下文无法判断用户需要的信息时设置 needsClarification=true，提供简短的 clarificationQuestion；存在有限选择时提供最多 6 个 clarificationOptions，不要猜测用户未提供的信息。只能选择允许的 intent 和 plan，不能执行工具、决定权限或编造事实。涉及写操作时 requiresApproval 必须为 true。' +
+          ' 如果当前问题包含“他/她/这个人/这个项目/上一份资料”等指代，先结合 conversationSummary 和 recentMessages 解析。最近上下文中只有一个明确实体时直接解析，并把解析后的完整问题写入 query；上一轮助手纠正过名称时优先使用纠正后的规范名称。只有存在多个候选实体，或没有任何可用上下文时，才设置 needsClarification=true。needsClarification 只由语义是否有歧义决定，不要仅因为 confidence 数值较低而澄清。',
       },
       {
         role: 'user' as const,
@@ -198,6 +244,8 @@ export class SupervisorAgent {
           input: trimmed,
           workspaceId: context.workspaceId,
           role: context.role ?? 'viewer',
+          conversationSummary: conversationContext.conversationSummary,
+          recentMessages: conversationContext.recentMessages,
           allowedPlans: [
             'search_knowledge',
             'get_document',

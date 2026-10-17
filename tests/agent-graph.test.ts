@@ -4,6 +4,33 @@ import { createKnowledgeAgentGraph } from '../src/agent/graph.js'
 import { supervisorDecisionSchema } from '../src/agent/supervisor.js'
 
 describe('knowledge graph', () => {
+  it('loads conversation context before supervisor planning', async () => {
+    let receivedContext: any
+    const graph = createKnowledgeAgentGraph(undefined, {
+      supervisor: {
+        classify: async (_input: string, context: any) => {
+          receivedContext = context
+          return {
+            decision: { intent: 'general_chat', needsRetrieval: false, plan: ['generate_answer'], requiresApproval: false, confidence: 1 },
+            fallback: false,
+          }
+        },
+      } as any,
+      conversations: {
+        recent: async () => [{ id: 'm1', role: 'assistant', content: '上一轮提到许永进。', citations: [{ title: '简历' }], createdAt: '2026-01-01T00:00:00Z' }],
+        summary: async () => '当前讨论许永进。',
+        append: async (value: any) => value,
+      } as any,
+      memories: { list: async () => [] } as any,
+      model: { streamChat: async function* () { yield '好的' } } as any,
+    })
+
+    await graph.invoke({ workspaceId: 'w1', userId: 'u1', runId: 'r-context', conversationId: 'c1', input: '他是谁？' })
+    expect(receivedContext.conversationSummary).toBe('当前讨论许永进。')
+    expect(receivedContext.recentMessages[0].content).toContain('许永进')
+    expect(receivedContext.recentMessages[0].citations[0].title).toBe('简历')
+  })
+
   it('retrieves evidence, generates an answer and persists citations', async () => {
     const appended: any[] = []
     const deltas: string[] = []

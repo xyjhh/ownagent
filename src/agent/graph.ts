@@ -110,6 +110,9 @@ export type KnowledgeAgentState = {
   intent?: UserIntent
   recentMessages?: ConversationMessage[]
   conversationSummary?: string
+  contextUsed?: boolean
+  contextMessageCount?: number
+  hasConversationSummary?: boolean
   memories?: MemoryItem[]
   evidence?: Evidence[]
   answer?: string
@@ -182,6 +185,9 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         reducer: (_: string | undefined, v: string | undefined) => v,
         default: () => undefined,
       },
+      contextUsed: { reducer: (_: boolean, v: boolean) => v, default: () => false },
+      contextMessageCount: { reducer: (_: number, v: number) => v, default: () => 0 },
+      hasConversationSummary: { reducer: (_: boolean, v: boolean) => v, default: () => false },
       memories: { reducer: (_: MemoryItem[], v: MemoryItem[]) => v, default: () => [] },
       evidence: { reducer: (_: Evidence[], v: Evidence[]) => v, default: () => [] },
       answer: { reducer: (_: string | undefined, v: string) => v, default: () => undefined },
@@ -220,28 +226,60 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
       }
     })
   }
-  addObservedNode('load_context', async (state: KnowledgeAgentState) => ({
-    recentMessages:
-      deps.conversations && state.conversationId
-        ? await deps.conversations.recent(state.conversationId, 12)
-        : [],
-    conversationSummary:
-      deps.conversations && state.conversationId
-        ? await deps.conversations.summary(state.conversationId)
-        : undefined,
-    memories: deps.memories ? await deps.memories.list(state.workspaceId, state.userId) : [],
-  }))
   addObservedNode('prefilter_input', async (state: KnowledgeAgentState) => ({
     input: (state.input ?? '').slice(0, 4000),
     originalInput: state.originalInput ?? (state.input ?? '').slice(0, 4000),
   }))
-  addObservedNode('intent_recognition', async (state: KnowledgeAgentState) => {
-    const result = deps.supervisor ? await deps.supervisor.classify(state.input ?? '', { workspaceId: state.workspaceId, userId: state.userId, trace: state.traceContext }) : { decision: fallbackDecision(state.input ?? ''), fallback: true }
-    return { supervisorDecision: result.decision, supervisorFallback: result.fallback, intent: result.decision.intent }
+  addObservedNode('load_conversation_context', async (state: KnowledgeAgentState) => {
+    const recentMessages = deps.conversations && state.conversationId
+      ? await deps.conversations.recent(state.conversationId, 8)
+      : []
+    const conversationSummary = deps.conversations && state.conversationId
+      ? await deps.conversations.summary(state.conversationId)
+      : undefined
+    return {
+      recentMessages,
+      conversationSummary,
+      contextUsed: Boolean(state.conversationId && deps.conversations),
+      contextMessageCount: recentMessages.length,
+      hasConversationSummary: Boolean(conversationSummary),
+    }
   })
+  addObservedNode('intent_recognition', async (state: KnowledgeAgentState) => {
+    const result = deps.supervisor ? await deps.supervisor.classify(state.input ?? '', {
+      workspaceId: state.workspaceId,
+      userId: state.userId,
+      conversationSummary: state.conversationSummary,
+      recentMessages: state.recentMessages?.map(message => ({
+        role: message.role,
+        content: message.content,
+        createdAt: message.createdAt,
+        citations: message.citations?.map(citation => ({ title: typeof citation.title === 'string' ? citation.title : undefined })),
+      })),
+      trace: state.traceContext,
+    }) : { decision: fallbackDecision(state.input ?? ''), fallback: true }
+    return {
+      supervisorDecision: result.decision,
+      supervisorFallback: result.fallback,
+      intent: result.decision.intent,
+      contextUsed: state.contextUsed === true,
+      contextMessageCount: state.contextMessageCount ?? 0,
+      hasConversationSummary: state.hasConversationSummary === true,
+    }
+  })
+  addObservedNode('load_context', async (state: KnowledgeAgentState) => ({
+    memories: deps.memories ? await deps.memories.list(state.workspaceId, state.userId) : [],
+  }))
   addObservedNode('supervisor_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
-    return { supervisorDecision: decision, supervisorFallback: state.supervisorFallback === true, intent: decision.intent }
+    return {
+      supervisorDecision: decision,
+      supervisorFallback: state.supervisorFallback === true,
+      intent: decision.intent,
+      contextUsed: state.contextUsed === true,
+      contextMessageCount: state.contextMessageCount ?? 0,
+      hasConversationSummary: state.hasConversationSummary === true,
+    }
   })
   addObservedNode('validate_plan', async (state: KnowledgeAgentState) => {
     const decision = state.supervisorDecision ?? fallbackDecision(state.input ?? '')
@@ -490,7 +528,8 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     return {}
   })
   graph.addEdge(START, 'prefilter_input')
-  graph.addEdge('prefilter_input', 'intent_recognition')
+  graph.addEdge('prefilter_input', 'load_conversation_context')
+  graph.addEdge('load_conversation_context', 'intent_recognition')
   graph.addEdge('intent_recognition', 'supervisor_plan')
   graph.addEdge('supervisor_plan', 'validate_plan')
   graph.addConditionalEdges('validate_plan', (state: KnowledgeAgentState) =>

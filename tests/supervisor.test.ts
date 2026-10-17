@@ -10,14 +10,42 @@ describe('SupervisorAgent', () => {
     expect((await supervisor.classify('approve: deploy', { workspaceId: 'w', userId: 'u' })).decision.requiresApproval).toBe(true)
     expect(model.chatJson).toHaveBeenCalledTimes(1)
   })
-  it('validates model output and falls back on low confidence or errors', async () => {
+  it('keeps model decisions with low confidence and falls back only on errors', async () => {
     const model = { chatJson: vi.fn().mockResolvedValue({ intent: 'knowledge_query', needsRetrieval: true, query: 'q', plan: ['search_knowledge', 'generate_answer'], requiresApproval: false, confidence: 0.9 }) }
     const supervisor = new SupervisorAgent(model as any)
     expect((await supervisor.classify('公司的报销政策是什么', { workspaceId: 'w', userId: 'u' })).decision.confidence).toBe(0.9)
     model.chatJson.mockResolvedValue({ intent: 'knowledge_query', needsRetrieval: true, plan: ['search_knowledge'], requiresApproval: false, confidence: 0.1 })
-    expect((await supervisor.classify('未知问题', { workspaceId: 'w', userId: 'u' })).fallback).toBe(true)
+    expect((await supervisor.classify('未知问题', { workspaceId: 'w', userId: 'u' })).fallback).toBe(false)
     model.chatJson.mockRejectedValue(new Error('timeout'))
     expect((await supervisor.classify('另一个问题', { workspaceId: 'w', userId: 'u' })).decision).toEqual(fallbackDecision('另一个问题'))
+  })
+
+  it('passes bounded conversation context so the model can resolve a unique reference', async () => {
+    const model = { chatJson: vi.fn().mockResolvedValue({
+      intent: 'knowledge_query',
+      needsRetrieval: true,
+      query: '许永进有几年工作经验',
+      plan: ['search_knowledge', 'generate_answer'],
+      requiresApproval: false,
+      confidence: 0.95,
+      needsClarification: false,
+    }) }
+    const supervisor = new SupervisorAgent(model as any)
+    const result = await supervisor.classify('他有几年工作经验', {
+      workspaceId: 'w',
+      userId: 'u',
+      conversationSummary: '当前讨论许永进的前端工程师简历。',
+      recentMessages: [
+        { role: 'user', content: '徐永进是谁' },
+        { role: 'assistant', content: '证据中的姓名是许永进，具备 2 年开发经验', citations: [{ title: '许永进-前端工程师-简历' }] },
+      ],
+    })
+    const payload = JSON.parse(model.chatJson.mock.calls[0][0][1].content)
+    expect(result.decision.needsClarification).toBe(false)
+    expect(result.decision.query).toContain('许永进')
+    expect(payload.conversationSummary).toContain('许永进')
+    expect(payload.recentMessages).toHaveLength(2)
+    expect(payload.recentMessages[1].citations[0].title).toBe('许永进-前端工程师-简历')
   })
 
   it('normalizes safe model aliases before strict validation', () => {

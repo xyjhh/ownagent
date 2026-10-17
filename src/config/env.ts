@@ -76,6 +76,8 @@ const schema = z.object({
   MEMORY_MAX_ITEMS_PER_CONTEXT: z.coerce.number().int().positive().max(100).default(20),
   CONVERSATION_RECENT_MESSAGES: z.coerce.number().int().positive().max(50).default(12),
   CONVERSATION_SUMMARY_THRESHOLD: z.coerce.number().int().positive().default(30),
+  CONVERSATION_SUMMARY_INPUT_TOKENS: z.coerce.number().int().positive().default(6_000),
+  CONVERSATION_SUMMARY_OUTPUT_TOKENS: z.coerce.number().int().positive().default(1_600),
   AGENT_MAX_EVIDENCE: z.coerce.number().int().positive().max(50).default(8),
   AGENT_MAX_CONTEXT_TOKENS: z.coerce.number().int().positive().default(12_000),
   RETRIEVAL_MODE: z.enum(['vector', 'hybrid']).default('hybrid'),

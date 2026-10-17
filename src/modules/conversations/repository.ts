@@ -1,6 +1,13 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 export type ConversationMessage = { id: string; role: 'user' | 'assistant' | 'system'; content: string; citations: Record<string, unknown>[]; createdAt: string }
+export type ConversationSummaryRecord = {
+  summary: string
+  coveredUntilMessageId?: string
+  model?: string
+  promptVersion?: string
+  updatedAt: string
+}
 
 export class ConversationRepository {
   constructor(private readonly db: SupabaseClient) {}
@@ -62,9 +69,61 @@ export class ConversationRepository {
     return { id: String(data.id), role: data.role as ConversationMessage['role'], content: String(data.content), citations: (data.citations ?? []) as Record<string, unknown>[], createdAt: String(data.created_at) }
   }
   async summary(conversationId: string) {
-    const { data, error } = await this.db.from('conversation_summaries').select('summary').eq('conversation_id', conversationId).maybeSingle()
+    const record = await this.summaryRecord(conversationId)
+    return record?.summary || undefined
+  }
+  async summaryRecord(conversationId: string): Promise<ConversationSummaryRecord | undefined> {
+    const { data, error } = await this.db
+      .from('conversation_summaries')
+      .select('summary,covered_until_message_id,model,prompt_version,updated_at')
+      .eq('conversation_id', conversationId)
+      .maybeSingle()
     if (error) throw new Error(`Conversation summary lookup failed: ${error.message}`)
-    return data?.summary ? String(data.summary) : undefined
+    if (!data) return undefined
+    return {
+      summary: String(data.summary ?? ''),
+      coveredUntilMessageId: data.covered_until_message_id ? String(data.covered_until_message_id) : undefined,
+      model: data.model ? String(data.model) : undefined,
+      promptVersion: data.prompt_version ? String(data.prompt_version) : undefined,
+      updatedAt: String(data.updated_at),
+    }
+  }
+  async summaryMessages(conversationId: string, afterMessageId?: string, limit = 500) {
+    const select = 'id,role,content,citations,created_at'
+    if (!afterMessageId) {
+      const { data, error } = await this.db
+        .from('conversation_messages')
+        .select(select)
+        .eq('conversation_id', conversationId)
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .limit(limit)
+      if (error) throw new Error(`Conversation summary messages lookup failed: ${error.message}`)
+      return this.mapMessages(data ?? [])
+    }
+
+    const { data: marker, error: markerError } = await this.db
+      .from('conversation_messages')
+      .select('id,created_at')
+      .eq('conversation_id', conversationId)
+      .eq('id', afterMessageId)
+      .maybeSingle()
+    if (markerError) throw new Error(`Conversation summary marker lookup failed: ${markerError.message}`)
+    if (!marker) return undefined
+
+    const { data, error } = await this.db
+      .from('conversation_messages')
+      .select(select)
+      .eq('conversation_id', conversationId)
+      .gte('created_at', String(marker.created_at))
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(Math.max(limit + 100, 500))
+    if (error) throw new Error(`Conversation summary messages lookup failed: ${error.message}`)
+    const rows = data ?? []
+    const markerIndex = rows.findIndex(row => String(row.id) === afterMessageId)
+    if (markerIndex < 0) return undefined
+    return this.mapMessages(rows.slice(markerIndex + 1, markerIndex + 1 + limit))
   }
   async updateTitleIfLatest(conversationId: string, title: string, expectedLastMessageId?: string) {
     if (!expectedLastMessageId) return false
@@ -75,5 +134,14 @@ export class ConversationRepository {
     })
     if (error) throw new Error(`Conversation title update failed: ${error.message}`)
     return Boolean(data)
+  }
+  private mapMessages(rows: Array<Record<string, unknown>>) {
+    return rows.map(row => ({
+      id: String(row.id),
+      role: row.role as ConversationMessage['role'],
+      content: String(row.content ?? ''),
+      citations: (row.citations ?? []) as Record<string, unknown>[],
+      createdAt: String(row.created_at),
+    }))
   }
 }
