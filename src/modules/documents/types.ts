@@ -33,6 +33,42 @@ export type Evidence = {
   metadata: Record<string, unknown>
 }
 export type DocumentContext = WorkspaceContext
+export type DocumentVersionSummary = {
+  id: string
+  version: number
+  status: 'building' | 'ready' | 'failed'
+  active: boolean
+  parserVersion?: string
+  chunkingVersion?: string
+  embeddingModel?: string
+  contentLength: number
+  chunkCount: number
+  createdAt: string
+  completedAt?: string
+  failedAt?: string
+  errorCode?: string
+  errorMessage?: string
+  metadata?: Record<string, unknown>
+  contentHash?: string
+  sourceFilename?: string
+  sourceFileSize?: number
+  sourceMimeType?: string
+  retryOfVersionId?: string
+}
+export type DocumentVersionDetail = DocumentVersionSummary & {
+  content: string
+  chunks: Array<{
+    id: string
+    index: number
+    content: string
+    pageNumber?: number
+    headingPath?: string[]
+    charStart?: number
+    charEnd?: number
+    tokenCount?: number
+    metadata: Record<string, unknown>
+  }>
+}
 export type DocumentReadResult = {
   documentId: string
   versionId: string

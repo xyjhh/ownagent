@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { loadConfig } from './config/env.js'
 import { createSupabaseAdmin, createSupabaseSchemaClient } from './infrastructure/supabase.js'
 import { RedisStreams, type StreamMessage } from './queue/redis-streams.js'
@@ -26,29 +27,54 @@ async function withLease(message: StreamMessage, fn: () => Promise<void>) {
 }
 
 async function processDocument(message: StreamMessage) {
-  const payload = JSON.parse(message.values.payload ?? '{}') as { documentId?: string }
+  const payload = JSON.parse(message.values.payload ?? '{}') as { documentId?: string; uploadId?: string; mode?: 'create' | 'replace' | 'reparse' | 'retry'; retryOfVersionId?: string }
   if (!payload.documentId) return
   const document = await repository.claimIngest(payload.documentId)
   if (!document) return
   const attempt = Number(document.ingest_attempt ?? 1)
   const trace = tracer.startTrace({ id: `document-ingest-${payload.documentId}-${attempt}`, name: 'document-ingest', workspaceId: String(document.workspace_id), metadata: { documentId: payload.documentId, attempt, taskType: 'document_ingest' } })
   const ingestSpan = trace?.span('document.ingest', { documentId: payload.documentId, attempt: document.ingest_attempt })
+  let versionId: string | undefined
   try {
-    const storage = db.storage.from(String(document.storage_bucket))
-    const downloadSpan = trace?.span('document.download', { documentId: payload.documentId, fileSize: document.file_size })
-    const downloaded = await storage.download(String(document.storage_key))
-    if (downloaded.error || !downloaded.data) throw new Error('FILE_DOWNLOAD_FAILED')
-    const buffer = Buffer.from(await downloaded.data.arrayBuffer())
-    downloadSpan?.end({ bytes: buffer.length })
-    const parseSpan = trace?.span('document.parse', { mimeType: document.mime_type, fileName: document.original_filename })
-    const parsed = await parserFor(String(document.mime_type), String(document.original_filename)).parse(buffer, { filename: String(document.original_filename), mimeType: String(document.mime_type) })
+    const upload = payload.uploadId ? await repository.getUploadForWorker(payload.uploadId) : null
+    const retrySource = payload.retryOfVersionId ? await repository.getVersionSourceForWorker(payload.retryOfVersionId) : null
+    let buffer: Buffer
+    const sourceBucket = upload?.storage_bucket ?? retrySource?.source_storage_bucket ?? document.storage_bucket
+    const sourceKey = upload?.storage_key ?? retrySource?.source_storage_key ?? document.storage_key
+    const sourceFileName = upload?.original_filename ?? retrySource?.source_filename ?? document.original_filename ?? `${document.title ?? 'document'}.txt`
+    const sourceMimeType = upload?.mime_type ?? retrySource?.source_mime_type ?? document.mime_type ?? 'text/plain'
+    if (sourceBucket && sourceKey) {
+      const storage = db.storage.from(String(sourceBucket))
+      const downloadSpan = trace?.span('document.download', { documentId: payload.documentId, fileSize: document.file_size })
+      const downloaded = await storage.download(String(sourceKey))
+      if (downloaded.error || !downloaded.data) throw new Error('FILE_DOWNLOAD_FAILED')
+      buffer = Buffer.from(await downloaded.data.arrayBuffer())
+      downloadSpan?.end({ bytes: buffer.length })
+    } else {
+      buffer = Buffer.from(String(document.content ?? ''), 'utf8')
+    }
+    const contentHash = createHash('sha256').update(buffer).digest('hex')
+    const mimeType = String(sourceMimeType)
+    const fileName = String(sourceFileName)
+    const activeVersion = await repository.activeVersionHash(payload.documentId)
+    if (activeVersion?.content_hash && activeVersion.content_hash === contentHash) {
+      await repository.setIngestIdle(payload.documentId)
+      return
+    }
+    if (payload.mode === 'replace') {
+      const duplicate = await repository.findDocumentByContentHash({ workspaceId: String(document.workspace_id), userId: String(document.owner_id ?? ''), role: 'owner' }, contentHash, payload.documentId)
+      if (duplicate) throw new Error(`DUPLICATE_DOCUMENT_CONTENT:${duplicate.id}`)
+    }
+    versionId = await repository.createBuildingVersion(payload.documentId, { parser: 'v1', chunking: 'structure-v1', embedding: config.EMBEDDING_MODEL }, { contentHash, fileName, fileSize: buffer.length, mimeType, storageBucket: sourceBucket ? String(sourceBucket) : undefined, storageKey: sourceKey ? String(sourceKey) : undefined, retryOfVersionId: payload.retryOfVersionId })
+    const parseSpan = trace?.span('document.parse', { mimeType, fileName })
+    const parsed = await parserFor(mimeType, fileName).parse(buffer, { filename: fileName, mimeType })
     parseSpan?.end({ textLength: parsed.text.length, sectionCount: parsed.sections.length })
     const chunkSpan = trace?.span('document.chunk', {})
     const chunks = chunkSections(parsed.sections)
     chunkSpan?.end({ chunkCount: chunks.length })
     const embeddings = await embedding.embed(chunks.map(chunk => chunk.content), trace?.context, 'document.embedding')
     const persistSpan = trace?.span('document.persist', { chunkCount: chunks.length, embeddingCount: embeddings.data.length })
-    const versionId = await repository.createVersion(payload.documentId, parsed.text, chunks.map((chunk, index) => ({ ...chunk, embedding: embeddings.data[index]?.embedding })), { parser: 'v1', chunking: 'structure-v1', embedding: config.EMBEDDING_MODEL })
+    await repository.persistVersionChunks(payload.documentId, versionId, parsed.text, chunks.map((chunk, index) => ({ ...chunk, embedding: embeddings.data[index]?.embedding })))
     persistSpan?.end({ versionId })
     const readySpan = trace?.span('document.mark_ready', { documentId: payload.documentId })
     await repository.markReady(payload.documentId, versionId)
@@ -58,15 +84,22 @@ async function processDocument(message: StreamMessage) {
   } catch (error) {
     ingestSpan?.fail(error)
     const messageText = error instanceof Error ? error.message : 'INGEST_FAILED'
-    if (attempt < config.INGEST_MAX_ATTEMPTS) {
+    const errorCode = messageText.startsWith('FILE_')
+      ? messageText.split(':', 1)[0]
+      : messageText.startsWith('DUPLICATE_DOCUMENT_CONTENT')
+        ? 'DUPLICATE_DOCUMENT_CONTENT'
+        : 'PARSER_FAILED'
+    if (versionId) await repository.markVersionFailed(versionId, errorCode, messageText).catch(() => undefined)
+    const retryable = errorCode !== 'DUPLICATE_DOCUMENT_CONTENT'
+    if (retryable && attempt < config.INGEST_MAX_ATTEMPTS) {
       trace?.update({ status: 'retrying', documentId: payload.documentId, attempt, error: messageText })
-      await repository.retryIngest(payload.documentId, config.REDIS_STREAM_DOCUMENT_INGEST, Math.min(60_000, 2 ** Math.max(0, attempt - 1) * 1000))
+      await repository.retryIngest(payload.documentId, config.REDIS_STREAM_DOCUMENT_INGEST, Math.min(60_000, 2 ** Math.max(0, attempt - 1) * 1000), { uploadId: payload.uploadId, mode: payload.mode ?? 'reparse', retryOfVersionId: payload.retryOfVersionId }, true)
       return
     } else {
       trace?.update({ status: 'failed', documentId: payload.documentId, attempt, error: messageText, deadLetter: true })
       const failedSpan = trace?.span('document.mark_failed', { documentId: payload.documentId, attempt })
-      await repository.markFailed(payload.documentId, messageText.startsWith('FILE_') ? messageText : 'PARSER_FAILED', messageText)
-      failedSpan?.end({ status: 'failed', errorCode: messageText.startsWith('FILE_') ? messageText : 'PARSER_FAILED' })
+      await repository.markFailed(payload.documentId, errorCode, messageText)
+      failedSpan?.end({ status: 'failed', errorCode })
       await queue.publishToStream(config.REDIS_STREAM_DOCUMENT_DEAD_LETTER, { documentId: payload.documentId, messageId: message.id, error: messageText, attempt })
       return
     }
