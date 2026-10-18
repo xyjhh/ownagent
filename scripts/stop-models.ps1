@@ -1,17 +1,10 @@
 [CmdletBinding()]
-param(
-  [string]$RerankerServiceDir = $env:OWNAGENT_RERANKER_SERVICE_DIR
-)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$projectsRoot = Split-Path -Parent $projectRoot
 $runtimeDir = Join-Path $projectRoot '.runtime'
-if ([string]::IsNullOrWhiteSpace($RerankerServiceDir)) {
-  $RerankerServiceDir = Join-Path $projectsRoot 'deno-supabase-express-nextjs-reactjs-agent\apps\reranker'
-}
 
 function Stop-ProcessTree([int]$ProcessId) {
   $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" -ErrorAction SilentlyContinue
@@ -35,15 +28,4 @@ if (Test-Path -LiteralPath $pidFile) {
   Remove-Item -LiteralPath $pidFile -Force
 } else {
   Write-Host 'No embedding process PID file was found in this project.'
-}
-
-$rerankerCompose = Join-Path $RerankerServiceDir 'docker-compose.yml'
-if (Test-Path -LiteralPath $rerankerCompose) {
-  & docker compose -f $rerankerCompose stop
-  if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to stop the reranker Docker service.'
-  }
-  Write-Host 'Stopped reranker Docker service. Its downloaded model volume was preserved.'
-} else {
-  Write-Warning "Reranker Compose configuration was not found at $RerankerServiceDir."
 }

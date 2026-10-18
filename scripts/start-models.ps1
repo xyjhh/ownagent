@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
   [string]$EmbeddingServiceDir = $env:OWNAGENT_EMBEDDING_SERVICE_DIR,
-  [string]$RerankerServiceDir = $env:OWNAGENT_RERANKER_SERVICE_DIR,
   [ValidateRange(10, 600)]
   [int]$StartupTimeoutSeconds = 180
 )
@@ -16,10 +15,6 @@ $runtimeDir = Join-Path $projectRoot '.runtime'
 if ([string]::IsNullOrWhiteSpace($EmbeddingServiceDir)) {
   $EmbeddingServiceDir = Join-Path $projectsRoot 'deno-supabase-express-nextjs-reactjs-agent\apps\embedding-directml'
 }
-if ([string]::IsNullOrWhiteSpace($RerankerServiceDir)) {
-  $RerankerServiceDir = Join-Path $projectsRoot 'deno-supabase-express-nextjs-reactjs-agent\apps\reranker'
-}
-
 function Test-Health([string]$Url) {
   try {
     $response = Invoke-WebRequest -Uri $Url -TimeoutSec 3 -UseBasicParsing
@@ -95,20 +90,4 @@ if (Test-Health $embeddingHealth) {
   }
 }
 
-$rerankerHealth = 'http://127.0.0.1:8001/health'
-if (Test-Health $rerankerHealth) {
-  Write-Host "Reranker service is already ready: $rerankerHealth"
-} else {
-  Assert-PortAvailable 8001 'Reranker'
-  $rerankerCompose = Join-Path $RerankerServiceDir 'docker-compose.yml'
-  if (-not (Test-Path -LiteralPath $rerankerCompose)) {
-    throw "Reranker Compose configuration was not found at $RerankerServiceDir. Set OWNAGENT_RERANKER_SERVICE_DIR to its directory."
-  }
-  & docker compose -f $rerankerCompose up -d
-  if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to start the reranker Docker service.'
-  }
-  Wait-ForHealth 'Reranker service' $rerankerHealth
-}
-
-Write-Host 'Both model services are ready.'
+Write-Host 'Local embedding service is ready.'

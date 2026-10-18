@@ -13,4 +13,3 @@ function Get-HealthStatus([string]$Name, [string]$Url) {
 }
 
 Get-HealthStatus 'Embedding' 'http://127.0.0.1:8002/health'
-Get-HealthStatus 'Reranker' 'http://127.0.0.1:8001/health'
