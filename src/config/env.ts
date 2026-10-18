@@ -37,10 +37,15 @@ const schema = z.object({
   DASHSCOPE_REGION: z.string().default('cn-beijing'),
   DASHSCOPE_RERANK_URL: z.string().url().optional(),
   RERANK_MODEL: z.string().default('qwen3.7-text-rerank'),
-  RERANK_INSTRUCT: z.string().default('Given a web search query, retrieve relevant passages that answer the query.'),
+  RERANK_INSTRUCT: z
+    .string()
+    .default('Given a web search query, retrieve relevant passages that answer the query.'),
   MODEL_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   REDIS_URL: z.string().url().default('redis://127.0.0.1:6379'),
-  REDIS_MAXMEMORY: z.string().regex(/^\d+(?:\.\d+)?\s*(?:b|kb|mb|gb)$/i, 'must be a Redis memory size such as 512mb').default('512mb'),
+  REDIS_MAXMEMORY: z
+    .string()
+    .regex(/^\d+(?:\.\d+)?\s*(?:b|kb|mb|gb)$/i, 'must be a Redis memory size such as 512mb')
+    .default('512mb'),
   REDIS_MAXMEMORY_POLICY: z.literal('noeviction').default('noeviction'),
   REDIS_DEAD_LETTER_MAXLEN: z.coerce.number().int().positive().max(1_000_000).default(10_000),
   REDIS_OUTBOX_RETRY_BASE_MS: z.coerce.number().int().positive().default(1_000),
@@ -62,11 +67,33 @@ const schema = z.object({
   INGEST_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
   DOCUMENT_MAX_FILE_SIZE_BYTES: z.coerce.number().int().positive().default(52_428_800),
   DOCUMENT_UPLOAD_PROTOCOL: z.enum(['tus']).default('tus').optional(),
-  DOCUMENT_UPLOAD_CHUNK_SIZE_BYTES: z.coerce.number().int().positive().default(16_777_216).optional(),
+  DOCUMENT_UPLOAD_CHUNK_SIZE_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(16_777_216)
+    .optional(),
   DOCUMENT_UPLOAD_EXPIRES_MS: z.coerce.number().int().positive().default(86_400_000).optional(),
-  DOCUMENT_UPLOAD_MAX_ACTIVE_PER_USER: z.coerce.number().int().positive().max(20).default(3).optional(),
-  DOCUMENT_DOWNLOAD_URL_EXPIRES_SECONDS: z.coerce.number().int().positive().max(86_400).default(600).optional(),
-  DOCUMENT_UPLOAD_ALLOWED_MIME_TYPES: z.string().default('application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain').optional(),
+  DOCUMENT_UPLOAD_MAX_ACTIVE_PER_USER: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(20)
+    .default(3)
+    .optional(),
+  DOCUMENT_DOWNLOAD_URL_EXPIRES_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(86_400)
+    .default(600)
+    .optional(),
+  DOCUMENT_UPLOAD_ALLOWED_MIME_TYPES: z
+    .string()
+    .default(
+      'application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/markdown,text/plain'
+    )
+    .optional(),
   SUPABASE_STORAGE_UPLOAD_TOKEN: z.string().min(1).optional(),
   SUPABASE_S3_ENDPOINT: z.string().url().optional(),
   SUPABASE_S3_ACCESS_KEY: z.string().min(1).optional(),
@@ -75,9 +102,19 @@ const schema = z.object({
   MEMORY_CONCURRENCY: z.coerce.number().int().positive().max(32).default(2).optional(),
   MEMORY_MAX_ATTEMPTS: z.coerce.number().int().positive().max(20).default(5).optional(),
   MEMORY_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000).optional(),
-  MEMORY_EMBEDDING_ENABLED: z.string().default('true').transform(value => value !== 'false').optional(),
-  MEMORY_AUTO_SAVE_LOW_RISK: z.string().default('true').transform(value => value !== 'false'),
-  MEMORY_CONFIRM_SENSITIVE: z.string().default('true').transform(value => value !== 'false'),
+  MEMORY_EMBEDDING_ENABLED: z
+    .string()
+    .default('true')
+    .transform(value => value !== 'false')
+    .optional(),
+  MEMORY_AUTO_SAVE_LOW_RISK: z
+    .string()
+    .default('true')
+    .transform(value => value !== 'false'),
+  MEMORY_CONFIRM_SENSITIVE: z
+    .string()
+    .default('true')
+    .transform(value => value !== 'false'),
   MEMORY_MAX_ITEMS_PER_CONTEXT: z.coerce.number().int().positive().max(100).default(20),
   CONVERSATION_RECENT_TOKENS: z.coerce.number().int().min(256).max(16_000).default(4_000),
   CONVERSATION_SUMMARY_THRESHOLD: z.coerce.number().int().positive().default(30),

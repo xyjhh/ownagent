@@ -14,7 +14,10 @@ type DashScopeRerankResponse = {
 }
 
 export class RerankerClient {
-  constructor(private readonly config: AppConfig, private readonly tracer?: LangfuseTracer) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly tracer?: LangfuseTracer
+  ) {}
 
   private endpoint() {
     if (this.config.DASHSCOPE_RERANK_URL) return this.config.DASHSCOPE_RERANK_URL
@@ -26,18 +29,27 @@ export class RerankerClient {
     return this.config.DASHSCOPE_API_KEY && this.endpoint() ? 'configured' : 'unavailable'
   }
 
-  async rerank(query: string, documents: RerankDocument[], topN = 6, trace?: TraceContext, operation = 'reranker'): Promise<RerankResponse> {
+  async rerank(
+    query: string,
+    documents: RerankDocument[],
+    topN = 6,
+    trace?: TraceContext,
+    operation = 'reranker'
+  ): Promise<RerankResponse> {
     if (!documents.length) return { results: [] }
     if (!this.config.DASHSCOPE_API_KEY) throw new Error('DASHSCOPE_API_KEY is not configured')
     const endpoint = this.endpoint()
-    if (!endpoint) throw new Error('DASHSCOPE_WORKSPACE_ID or DASHSCOPE_RERANK_URL is not configured')
+    if (!endpoint)
+      throw new Error('DASHSCOPE_WORKSPACE_ID or DASHSCOPE_RERANK_URL is not configured')
 
     const limit = Math.max(1, Math.min(topN, documents.length))
-    const span = trace && this.tracer?.startSpan(trace, operation, {
-      model: this.config.RERANK_MODEL,
-      candidateCount: documents.length,
-      topN: limit,
-    })
+    const span =
+      trace &&
+      this.tracer?.startSpan(trace, operation, {
+        model: this.config.RERANK_MODEL,
+        candidateCount: documents.length,
+        topN: limit,
+      })
     try {
       const result = await fetchJson<DashScopeRerankResponse>(
         endpoint,
@@ -62,10 +74,17 @@ export class RerankerClient {
         this.config.MODEL_TIMEOUT_MS
       )
       if (!Array.isArray(result.output?.results)) {
-        throw new Error(`DashScope rerank returned an invalid response${result.code ? `: ${result.code}` : ''}`)
+        throw new Error(
+          `DashScope rerank returned an invalid response${result.code ? `: ${result.code}` : ''}`
+        )
       }
       const mapped = result.output.results
-        .filter(item => Number.isInteger(item.index) && Number(item.index) >= 0 && Number(item.index) < documents.length)
+        .filter(
+          item =>
+            Number.isInteger(item.index) &&
+            Number(item.index) >= 0 &&
+            Number(item.index) < documents.length
+        )
         .map(item => ({
           id: documents[Number(item.index!)].id,
           score: Number(item.relevance_score ?? 0),

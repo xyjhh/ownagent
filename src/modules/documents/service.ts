@@ -38,7 +38,16 @@ export class DocumentService {
   }
 
   async search(context: WorkspaceContext, query: string, limit = 20) {
-    const candidates = (await retrieveCandidates(this.repository, this.embedding, context, query, limit, this.retrievalMode)).results
+    const candidates = (
+      await retrieveCandidates(
+        this.repository,
+        this.embedding,
+        context,
+        query,
+        limit,
+        this.retrievalMode
+      )
+    ).results
     if (!candidates.length) return []
     const reranked = await this.reranker.rerank(
       query,

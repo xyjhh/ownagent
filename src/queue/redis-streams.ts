@@ -80,7 +80,9 @@ export class RedisStreams {
   async ackAndDelete(stream: string, group: string, id: string) {
     await this.connect()
     const result = await this.client.multi().xack(stream, group, id).xdel(stream, id).exec()
-    const commandError = (result as Array<[Error | null, unknown]> | null)?.find(item => item[0])?.[0]
+    const commandError = (result as Array<[Error | null, unknown]> | null)?.find(
+      item => item[0]
+    )?.[0]
     if (commandError) throw commandError
     // Pub/Sub is only a wakeup hint. The durable Outbox remains the source of truth.
     try {
@@ -203,16 +205,16 @@ export class RedisStreams {
     await this.connect()
     const length = Number(await this.client.xlen(stream))
     if (!group) return { length, pendingCount: 0, oldestPendingIdleMs: 0 }
-    const pending = (await (this.client as any).xpending(stream, group)) as [number | string, ...unknown[]]
+    const pending = (await (this.client as any).xpending(stream, group)) as [
+      number | string,
+      ...unknown[],
+    ]
     const pendingCount = Number(pending?.[0] ?? 0)
     let oldestPendingIdleMs = 0
     if (pendingCount > 0) {
-      const first = (await (this.client as any).xpending(stream, group, '-', '+', 1)) as Array<[
-        string,
-        string,
-        number | string,
-        number | string,
-      ]>
+      const first = (await (this.client as any).xpending(stream, group, '-', '+', 1)) as Array<
+        [string, string, number | string, number | string]
+      >
       oldestPendingIdleMs = Number(first?.[0]?.[2] ?? 0)
     }
     return { length, pendingCount, oldestPendingIdleMs }
@@ -235,9 +237,11 @@ export class RedisStreams {
     }
   }
   async close() {
-    await Promise.all([...this.blockingClients.values()].map(async client => {
-      if (client.status !== 'end') await client.quit()
-    }))
+    await Promise.all(
+      [...this.blockingClients.values()].map(async client => {
+        if (client.status !== 'end') await client.quit()
+      })
+    )
     this.blockingClients.clear()
     if (this.client.status !== 'end') await this.client.quit()
   }

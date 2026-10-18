@@ -100,7 +100,14 @@ export class LangfuseTracer {
     if (!this.client) return null
     try {
       const trace = this.client.trace({ id: context.traceId })
-      return this.wrapObservation(trace.span({ name, parentObservationId: context.parentObservationId, metadata: this.safeMetadata(metadata) }), context)
+      return this.wrapObservation(
+        trace.span({
+          name,
+          parentObservationId: context.parentObservationId,
+          metadata: this.safeMetadata(metadata),
+        }),
+        context
+      )
     } catch {
       return null
     }
@@ -110,7 +117,15 @@ export class LangfuseTracer {
     if (!this.client) return null
     try {
       const trace = this.client.trace({ id: context.traceId })
-      return this.wrapObservation(trace.generation({ name, input: this.safeContent(input), parentObservationId: context.parentObservationId, metadata: this.safeMetadata(metadata) }), context)
+      return this.wrapObservation(
+        trace.generation({
+          name,
+          input: this.safeContent(input),
+          parentObservationId: context.parentObservationId,
+          metadata: this.safeMetadata(metadata),
+        }),
+        context
+      )
     } catch {
       return null
     }
@@ -118,29 +133,58 @@ export class LangfuseTracer {
 
   async flushAsync() {
     if (!this.client) return
-    try { await this.client.flushAsync() } catch { /* observability is non-blocking */ }
+    try {
+      await this.client.flushAsync()
+    } catch {
+      /* observability is non-blocking */
+    }
   }
 
   async shutdownAsync() {
     if (!this.client) return
-    try { await this.client.shutdownAsync() } catch { /* ignore shutdown telemetry failures */ }
+    try {
+      await this.client.shutdownAsync()
+    } catch {
+      /* ignore shutdown telemetry failures */
+    }
   }
 
   private wrapTrace(trace: any, context: TraceContext): TraceHandle {
     return {
       traceId: context.traceId,
       context,
-      span: (name, metadata) => this.wrapObservation(trace.span({ name, metadata: this.safeMetadata(metadata) }), context),
-      generation: (name, input, metadata) => this.wrapObservation(trace.generation({ name, input: this.safeContent(input), metadata: this.safeMetadata(metadata) }), context),
-      event: (name, metadata) => { try { trace.event({ name, metadata: this.safeMetadata(metadata) }) } catch { /* best effort */ } },
-      update: (result) => {
+      span: (name, metadata) =>
+        this.wrapObservation(trace.span({ name, metadata: this.safeMetadata(metadata) }), context),
+      generation: (name, input, metadata) =>
+        this.wrapObservation(
+          trace.generation({
+            name,
+            input: this.safeContent(input),
+            metadata: this.safeMetadata(metadata),
+          }),
+          context
+        ),
+      event: (name, metadata) => {
+        try {
+          trace.event({ name, metadata: this.safeMetadata(metadata) })
+        } catch {
+          /* best effort */
+        }
+      },
+      update: result => {
         try {
           const { output, statusMessage, metadata, ...rest } = result
           trace.update({
             ...(output !== undefined ? { output: this.safeContent(output) } : {}),
-            metadata: this.safeMetadata({ ...rest, ...(metadata && typeof metadata === 'object' ? metadata : {}), ...(statusMessage !== undefined ? { statusMessage: String(statusMessage) } : {}) }),
+            metadata: this.safeMetadata({
+              ...rest,
+              ...(metadata && typeof metadata === 'object' ? metadata : {}),
+              ...(statusMessage !== undefined ? { statusMessage: String(statusMessage) } : {}),
+            }),
           })
-        } catch { /* best effort */ }
+        } catch {
+          /* best effort */
+        }
       },
     }
   }
@@ -150,11 +194,26 @@ export class LangfuseTracer {
     return {
       id: String(observation.id ?? ''),
       context: { ...context, parentObservationId: String(observation.id ?? '') },
-      end: (output, metadata) => { try { observation.end({ output: this.safeContent(output), metadata: this.safeMetadata(metadata) }) } catch { /* best effort */ } },
+      end: (output, metadata) => {
+        try {
+          observation.end({
+            output: this.safeContent(output),
+            metadata: this.safeMetadata(metadata),
+          })
+        } catch {
+          /* best effort */
+        }
+      },
       fail: (error, metadata) => {
         try {
-          observation.end({ level: 'ERROR', statusMessage: error instanceof Error ? error.message : String(error), metadata: this.safeMetadata(metadata) })
-        } catch { /* best effort */ }
+          observation.end({
+            level: 'ERROR',
+            statusMessage: error instanceof Error ? error.message : String(error),
+            metadata: this.safeMetadata(metadata),
+          })
+        } catch {
+          /* best effort */
+        }
       },
     }
   }
@@ -163,7 +222,13 @@ export class LangfuseTracer {
     if (value === undefined) return undefined
     if (this.captureContent) return value
     const serialized = typeof value === 'string' ? value : JSON.stringify(value)
-    return { redacted: true, length: serialized?.length ?? 0, sha256: createHash('sha256').update(serialized ?? '').digest('hex') }
+    return {
+      redacted: true,
+      length: serialized?.length ?? 0,
+      sha256: createHash('sha256')
+        .update(serialized ?? '')
+        .digest('hex'),
+    }
   }
 
   private safeMetadata(value?: TraceMetadata) {

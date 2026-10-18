@@ -74,6 +74,11 @@ export type DocumentReadResult = {
   versionId: string
   title: string
   content: string
-  chunks: Array<Pick<Evidence, 'chunkId' | 'content' | 'pageNumber' | 'headingPath' | 'metadata'> & { charStart?: number; charEnd?: number }>
+  chunks: Array<
+    Pick<Evidence, 'chunkId' | 'content' | 'pageNumber' | 'headingPath' | 'metadata'> & {
+      charStart?: number
+      charEnd?: number
+    }
+  >
 }
 export type ComparisonSource = DocumentReadResult

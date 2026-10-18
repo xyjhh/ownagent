@@ -12,18 +12,16 @@ export class AuditService {
     ipHash?: string
     metadata?: Record<string, unknown>
   }): Promise<void> {
-    const { error } = await this.db
-      .from('audit_logs')
-      .insert({
-        user_id: input.context?.userId ?? null,
-        workspace_id: input.context?.workspaceId ?? null,
-        action: input.action,
-        resource_type: input.resourceType,
-        resource_id: input.resourceId ?? null,
-        request_id: input.requestId ?? null,
-        ip_hash: input.ipHash ?? null,
-        metadata: input.metadata ?? {},
-      })
+    const { error } = await this.db.from('audit_logs').insert({
+      user_id: input.context?.userId ?? null,
+      workspace_id: input.context?.workspaceId ?? null,
+      action: input.action,
+      resource_type: input.resourceType,
+      resource_id: input.resourceId ?? null,
+      request_id: input.requestId ?? null,
+      ip_hash: input.ipHash ?? null,
+      metadata: input.metadata ?? {},
+    })
     if (error) throw new Error(`Audit log write failed: ${error.message}`)
   }
 }

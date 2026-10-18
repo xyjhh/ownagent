@@ -57,7 +57,10 @@ export class OutboxDispatcher {
 
   private async connectListener() {
     if (!this.running) return
-    const client = new Client({ connectionString: this.databaseUrl, application_name: this.workerId })
+    const client = new Client({
+      connectionString: this.databaseUrl,
+      application_name: this.workerId,
+    })
     this.listener = client
     client.on('notification', notification => {
       if (notification.channel !== 'ownagent_outbox') return
@@ -78,19 +81,27 @@ export class OutboxDispatcher {
 
   private reconnect() {
     if (!this.running || this.reconnectTimer) return
-    this.reconnectTimer = setTimeout(() => { this.reconnectTimer = undefined; void this.connectListener() }, 1000)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      void this.connectListener()
+    }, 1000)
   }
 
   async flush() {
     if (!this.running) return
-    if (this.flushing) { this.wakePending = true; return this.flushing }
+    if (this.flushing) {
+      this.wakePending = true
+      return this.flushing
+    }
     this.wakePending = false
-    this.flushing = this.flushClaimed().catch(() => {
-      this.scheduleRetry(this.retry.baseMs)
-    }).finally(() => {
-      this.flushing = undefined
-      if (this.running && this.wakePending) void this.flush()
-    })
+    this.flushing = this.flushClaimed()
+      .catch(() => {
+        this.scheduleRetry(this.retry.baseMs)
+      })
+      .finally(() => {
+        this.flushing = undefined
+        if (this.running && this.wakePending) void this.flush()
+      })
     return this.flushing
   }
 
@@ -99,9 +110,20 @@ export class OutboxDispatcher {
       const entries = await this.repository.claimOutbox(100, this.workerId)
       if (!entries.length) return
       for (const entry of entries) {
-        const span = this.tracer?.startSpan({ traceId: String(entry.run_id), runId: String(entry.run_id), workspaceId: String(entry.workspace_id) }, 'outbox.publish', {
-          stream: String(entry.stream), messageId: String(entry.id), runId: String(entry.run_id), attempts: Number(entry.attempts) || 0,
-        })
+        const span = this.tracer?.startSpan(
+          {
+            traceId: String(entry.run_id),
+            runId: String(entry.run_id),
+            workspaceId: String(entry.workspace_id),
+          },
+          'outbox.publish',
+          {
+            stream: String(entry.stream),
+            messageId: String(entry.id),
+            runId: String(entry.run_id),
+            attempts: Number(entry.attempts) || 0,
+          }
+        )
         const started = Date.now()
         try {
           await this.queue.publish(String(entry.stream), entry.payload as Record<string, unknown>)
@@ -120,7 +142,11 @@ export class OutboxDispatcher {
           await this.repository
             .releaseOutbox(String(entry.id), this.workerId, message, delayMs)
             .catch(() => undefined)
-          span?.fail(error, { published: false, durationMs: Date.now() - started, errorCode: message })
+          span?.fail(error, {
+            published: false,
+            durationMs: Date.now() - started,
+            errorCode: message,
+          })
           this.scheduleRetry(delayMs)
         }
       }
@@ -130,10 +156,13 @@ export class OutboxDispatcher {
   private scheduleRetry(delayMs: number) {
     if (!this.running) return
     if (this.retryTimer) return
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = undefined
-      void this.flush()
-    }, Math.max(1, delayMs))
+    this.retryTimer = setTimeout(
+      () => {
+        this.retryTimer = undefined
+        void this.flush()
+      },
+      Math.max(1, delayMs)
+    )
   }
 
   async stop() {

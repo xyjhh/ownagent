@@ -53,7 +53,10 @@ export class HealthService {
         this.queue.streamStats(this.config.REDIS_STREAM_AGENT, this.config.REDIS_CONSUMER_GROUP),
         this.queue.streamStats(this.config.REDIS_STREAM_CONTROLS, this.config.REDIS_CONSUMER_GROUP),
         this.queue.streamStats(this.config.REDIS_STREAM_DEAD_LETTER),
-        this.queue.streamStats(this.config.REDIS_STREAM_MEMORY ?? 'ownagent:memory-tasks', this.config.REDIS_CONSUMER_GROUP),
+        this.queue.streamStats(
+          this.config.REDIS_STREAM_MEMORY ?? 'ownagent:memory-tasks',
+          this.config.REDIS_CONSUMER_GROUP
+        ),
       ])
       return {
         usedMemory: memory.usedMemory,
@@ -103,7 +106,9 @@ export class HealthService {
   }
 }
 
-function pressureLevel(ratio: number | null): 'unknown' | 'normal' | 'notice' | 'warning' | 'critical' {
+function pressureLevel(
+  ratio: number | null
+): 'unknown' | 'normal' | 'notice' | 'warning' | 'critical' {
   if (ratio === null) return 'unknown'
   if (ratio >= 0.95) return 'critical'
   if (ratio >= 0.85) return 'warning'

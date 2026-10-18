@@ -27,15 +27,26 @@ const embedding = new EmbeddingClient(config, tracer)
 const reranker = new RerankerClient(config, tracer)
 const queue = new RedisStreams(config)
 const runRepository = new RunRepository(schemaDb)
-const runService = new RunService(runRepository, queue, {
-  stream: config.REDIS_STREAM_AGENT,
-  controlStream: config.REDIS_STREAM_CONTROLS,
-  maxAttempts: config.WORKER_MAX_ATTEMPTS,
-}, tracer)
-const outbox = new OutboxDispatcher(runRepository, queue, config.DATABASE_URL, {
-  baseMs: config.REDIS_OUTBOX_RETRY_BASE_MS,
-  maxMs: config.REDIS_OUTBOX_RETRY_MAX_MS,
-}, tracer)
+const runService = new RunService(
+  runRepository,
+  queue,
+  {
+    stream: config.REDIS_STREAM_AGENT,
+    controlStream: config.REDIS_STREAM_CONTROLS,
+    maxAttempts: config.WORKER_MAX_ATTEMPTS,
+  },
+  tracer
+)
+const outbox = new OutboxDispatcher(
+  runRepository,
+  queue,
+  config.DATABASE_URL,
+  {
+    baseMs: config.REDIS_OUTBOX_RETRY_BASE_MS,
+    maxMs: config.REDIS_OUTBOX_RETRY_MAX_MS,
+  },
+  tracer
+)
 outbox.start()
 const health = new HealthService(config, schemaDb, undefined, undefined, undefined, queue, tracer)
 const app = createApp({

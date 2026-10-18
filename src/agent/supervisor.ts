@@ -2,7 +2,10 @@ import { z, type ZodSchema } from 'zod'
 import type { DeepSeekClient } from '../integrations/deepseek.js'
 import type { TraceContext } from '../observability/langfuse.js'
 import type { ConversationMessage } from '../modules/conversations/repository.js'
-import { selectRecentMessagesByTokenBudget, truncateTextToTokenBudget } from '../modules/conversations/token-window.js'
+import {
+  selectRecentMessagesByTokenBudget,
+  truncateTextToTokenBudget,
+} from '../modules/conversations/token-window.js'
 
 const supervisorIntentAliases: Record<string, string> = {
   knowledge: 'knowledge_query',
@@ -71,7 +74,8 @@ function normalizeSupervisorDecision(value: unknown): unknown {
   if (typeof output.clarificationQuestion === 'string') {
     const clarificationQuestion = output.clarificationQuestion.trim()
     if (clarificationQuestion.length === 0) {
-      if (output.needsClarification === true) output.clarificationQuestion = DEFAULT_CLARIFICATION_QUESTION
+      if (output.needsClarification === true)
+        output.clarificationQuestion = DEFAULT_CLARIFICATION_QUESTION
       else delete output.clarificationQuestion
     } else output.clarificationQuestion = clarificationQuestion
   } else if (output.clarificationQuestion === null) {
@@ -173,26 +177,35 @@ function formatConversationContext(context: SupervisorContext, tokenBudget: numb
   const summary = context.conversationSummary?.trim()
     ? truncateTextToTokenBudget(context.conversationSummary.trim(), MAX_CONTEXT_SUMMARY_TOKENS)
     : undefined
-  const normalizedMessages: ConversationMessage[] = (context.recentMessages ?? [])
-    .map((message, index) => {
+  const normalizedMessages: ConversationMessage[] = (context.recentMessages ?? []).map(
+    (message, index) => {
       const citations = (message.citations ?? [])
-        .map(citation => typeof citation.title === 'string' ? citation.title.trim() : '')
+        .map(citation => (typeof citation.title === 'string' ? citation.title.trim() : ''))
         .filter(Boolean)
         .slice(0, 8)
       return {
         id: `context-${index}`,
         role: message.role,
-        content: String(message.content ?? '').trim().slice(0, MAX_CONTEXT_MESSAGE_LENGTH),
+        content: String(message.content ?? '')
+          .trim()
+          .slice(0, MAX_CONTEXT_MESSAGE_LENGTH),
         createdAt: message.createdAt ?? '',
         citations: citations.map(title => ({ title })),
       }
-    })
+    }
+  )
   const window = selectRecentMessagesByTokenBudget(normalizedMessages, tokenBudget)
   const recentMessages = window.messages.map(message => ({
     role: message.role,
     content: message.content,
     ...(message.createdAt ? { createdAt: message.createdAt } : {}),
-    ...(message.citations.length ? { citations: message.citations.map(citation => ({ title: typeof citation.title === 'string' ? citation.title : undefined })) } : {}),
+    ...(message.citations.length
+      ? {
+          citations: message.citations.map(citation => ({
+            title: typeof citation.title === 'string' ? citation.title : undefined,
+          })),
+        }
+      : {}),
   }))
 
   return { conversationSummary: summary, recentMessages }
@@ -221,8 +234,8 @@ export class SupervisorAgent {
       maxRetries: number
       model?: string
       timeoutMs?: number
-    recentTokenBudget?: number
-  } = { confidenceThreshold: 0.65, maxRetries: 1, recentTokenBudget: 4_000 }
+      recentTokenBudget?: number
+    } = { confidenceThreshold: 0.65, maxRetries: 1, recentTokenBudget: 4_000 }
   ) {}
 
   async classify(
@@ -232,7 +245,10 @@ export class SupervisorAgent {
     const trimmed = input.trim()
     const control = this.controlDecision(trimmed)
     if (control) return { decision: control, fallback: false }
-    const conversationContext = formatConversationContext(context, this.options.recentTokenBudget ?? 4_000)
+    const conversationContext = formatConversationContext(
+      context,
+      this.options.recentTokenBudget ?? 4_000
+    )
     const messages = [
       {
         role: 'system' as const,

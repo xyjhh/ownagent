@@ -99,14 +99,12 @@ export class SupabaseAuthRepository implements AuthRepository {
     userAgent?: string
     ipHash?: string
   }): Promise<void> {
-    const { error } = await this.db
-      .from('auth_sessions')
-      .insert({
-        id: input.id,
-        user_id: input.userId,
-        user_agent: input.userAgent ?? null,
-        ip_hash: input.ipHash ?? null,
-      })
+    const { error } = await this.db.from('auth_sessions').insert({
+      id: input.id,
+      user_id: input.userId,
+      user_agent: input.userAgent ?? null,
+      ip_hash: input.ipHash ?? null,
+    })
     if (error) databaseError(error, 'session creation')
   }
 

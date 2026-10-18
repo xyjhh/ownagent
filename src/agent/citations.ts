@@ -13,7 +13,10 @@ export type ReferencedCitation = {
  * Select only the evidence references explicitly used in a generated answer.
  * The returned referenceIndex preserves the number shown to the user.
  */
-export function selectCitationsFromAnswer<T extends ReferencedCitation>(answer: string, citations: T[]): Array<T & { referenceIndex: number }> {
+export function selectCitationsFromAnswer<T extends ReferencedCitation>(
+  answer: string,
+  citations: T[]
+): Array<T & { referenceIndex: number }> {
   const indexes = new Set<number>()
   for (const match of answer.matchAll(/\[(\d+)\]/g)) {
     const index = Number(match[1])

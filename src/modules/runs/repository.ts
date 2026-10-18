@@ -300,14 +300,12 @@ export class RunRepository {
     if (error) throw new Error(`Outbox release failed: ${error.message}`)
   }
   async enqueueRetry(runId: string, delayMs: number) {
-    const { error } = await this.db
-      .from('task_outbox')
-      .insert({
-        run_id: runId,
-        stream: 'ownagent:agent-runs',
-        payload: { runId },
-        available_at: new Date(Date.now() + delayMs).toISOString(),
-      })
+    const { error } = await this.db.from('task_outbox').insert({
+      run_id: runId,
+      stream: 'ownagent:agent-runs',
+      payload: { runId },
+      available_at: new Date(Date.now() + delayMs).toISOString(),
+    })
     if (error) throw new Error(`Retry enqueue failed: ${error.message}`)
   }
   async getById(runId: string): Promise<AgentRun | null> {

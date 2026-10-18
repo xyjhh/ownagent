@@ -64,7 +64,11 @@ export function createRunRouter(
   })
   router.post('/:workspaceId/runs/:runId/cancel', access, async (request, response, next) => {
     try {
-      const run = await service.cancel(request.workspace!, String(request.params.runId), request.requestId)
+      const run = await service.cancel(
+        request.workspace!,
+        String(request.params.runId),
+        request.requestId
+      )
       if (!run)
         return response.status(404).json({
           error: { code: 'NOT_FOUND', message: 'Run not found', requestId: request.requestId },
@@ -84,15 +88,13 @@ export function createRunRouter(
         })
         .safeParse(request.body)
       if (!input.success)
-        return response
-          .status(400)
-          .json({
-            error: {
-              code: 'INVALID_INPUT',
-              message: 'approvalId and value are required',
-              requestId: request.requestId,
-            },
-          })
+        return response.status(400).json({
+          error: {
+            code: 'INVALID_INPUT',
+            message: 'approvalId and value are required',
+            requestId: request.requestId,
+          },
+        })
       const run = await service.approve(
         request.workspace!,
         String(request.params.runId),
@@ -117,15 +119,13 @@ export function createRunRouter(
         })
         .safeParse(request.body)
       if (!input.success)
-        return response
-          .status(400)
-          .json({
-            error: {
-              code: 'INVALID_INPUT',
-              message: 'approvalId is required',
-              requestId: request.requestId,
-            },
-          })
+        return response.status(400).json({
+          error: {
+            code: 'INVALID_INPUT',
+            message: 'approvalId is required',
+            requestId: request.requestId,
+          },
+        })
       const run = await service.approve(
         request.workspace!,
         String(request.params.runId),
@@ -170,15 +170,13 @@ export function createRunRouter(
         })
         .safeParse(request.body)
       if (!input.success)
-        return response
-          .status(400)
-          .json({
-            error: {
-              code: 'INVALID_INPUT',
-              message: 'question is required',
-              requestId: request.requestId,
-            },
-          })
+        return response.status(400).json({
+          error: {
+            code: 'INVALID_INPUT',
+            message: 'question is required',
+            requestId: request.requestId,
+          },
+        })
       const run = await service.control(
         request.workspace!,
         String(request.params.runId),

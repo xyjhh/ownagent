@@ -20,7 +20,8 @@ export function estimateTextTokens(value: string): number {
   for (const character of Array.from(value)) {
     if (chineseHanPattern.test(character)) chinese += 1
     else if (/\s/u.test(character)) continue
-    else if (englishOrDigitPattern.test(character) || punctuationPattern.test(character)) latinOrPunctuation += 1
+    else if (englishOrDigitPattern.test(character) || punctuationPattern.test(character))
+      latinOrPunctuation += 1
     else unsupported += 1
   }
   return Math.max(1, chinese + Math.ceil(latinOrPunctuation / 4) + unsupported)
@@ -28,7 +29,7 @@ export function estimateTextTokens(value: string): number {
 
 function messagePayload(message: ConversationMessage) {
   const citations = (message.citations ?? [])
-    .map(citation => typeof citation.title === 'string' ? citation.title.trim() : '')
+    .map(citation => (typeof citation.title === 'string' ? citation.title.trim() : ''))
     .filter(Boolean)
     .slice(0, 8)
   return {
@@ -55,7 +56,10 @@ export function truncateTextToTokenBudget(value: string, tokenBudget: number): s
   while (low <= high) {
     const half = Math.floor((low + high) / 2)
     const candidate = `${characters.slice(0, half).join('')}${truncationMarker}${characters.slice(-half).join('')}`
-    if (estimateTextTokens(candidate) <= tokenBudget && estimateTextTokens(candidate) <= available + estimateTextTokens(truncationMarker)) {
+    if (
+      estimateTextTokens(candidate) <= tokenBudget &&
+      estimateTextTokens(candidate) <= available + estimateTextTokens(truncationMarker)
+    ) {
       best = candidate
       low = half + 1
     } else {
@@ -75,14 +79,23 @@ function sortMessages(messages: ConversationMessage[]) {
     })
 }
 
-function truncateMessageToBudget(message: ConversationMessage, tokenBudget: number): ConversationMessage {
+function truncateMessageToBudget(
+  message: ConversationMessage,
+  tokenBudget: number
+): ConversationMessage {
   const emptyContentMessage = { ...message, content: '' }
-  const contentBudget = Math.max(1, tokenBudget - estimateConversationMessageTokens(emptyContentMessage))
+  const contentBudget = Math.max(
+    1,
+    tokenBudget - estimateConversationMessageTokens(emptyContentMessage)
+  )
   const content = truncateTextToTokenBudget(message.content, contentBudget)
   return { ...message, content }
 }
 
-export function selectRecentMessagesByTokenBudget(messages: ConversationMessage[], tokenBudget: number): TokenWindowResult {
+export function selectRecentMessagesByTokenBudget(
+  messages: ConversationMessage[],
+  tokenBudget: number
+): TokenWindowResult {
   const budget = Math.max(1, Math.floor(tokenBudget))
   const ordered = sortMessages(messages)
   const selected: ConversationMessage[] = []

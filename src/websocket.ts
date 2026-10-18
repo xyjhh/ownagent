@@ -120,11 +120,26 @@ export class RealtimeWebSocketServer {
       })
       if (!socket.destroyed && socket.writable) {
         socket.on('error', () => undefined)
-        const statusText = status === 401 ? 'Unauthorized' : status === 403 ? 'Forbidden' : status === 404 ? 'Not Found' : status === 503 ? 'Service Unavailable' : status >= 500 ? 'Internal Server Error' : 'Bad Request'
+        const statusText =
+          status === 401
+            ? 'Unauthorized'
+            : status === 403
+              ? 'Forbidden'
+              : status === 404
+                ? 'Not Found'
+                : status === 503
+                  ? 'Service Unavailable'
+                  : status >= 500
+                    ? 'Internal Server Error'
+                    : 'Bad Request'
         const body = `${code}: ${reason}`
         try {
-          socket.write(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
-        } catch { /* the browser may have already aborted the upgrade */ }
+          socket.write(
+            `HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
+          )
+        } catch {
+          /* the browser may have already aborted the upgrade */
+        }
       }
       socket.destroy()
     }
@@ -170,7 +185,16 @@ export class RealtimeWebSocketServer {
           typeof input.idempotencyKey === 'string' ? input.idempotencyKey.trim() : ''
         if (!idempotencyKey || idempotencyKey.length > 200)
           throw new ApiError(400, 'IDEMPOTENCY_KEY_REQUIRED', 'idempotencyKey is required')
-        const run = await this.runService.create(membership, { question, ...(typeof input.conversationId === 'string' ? { conversationId: input.conversationId } : {}) }, idempotencyKey)
+        const run = await this.runService.create(
+          membership,
+          {
+            question,
+            ...(typeof input.conversationId === 'string'
+              ? { conversationId: input.conversationId }
+              : {}),
+          },
+          idempotencyKey
+        )
         this.send(client, { type: 'run_created', run })
         return this.subscribe(client, workspaceId, run.id, 0)
       }

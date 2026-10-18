@@ -30,7 +30,13 @@ const tracer = new LangfuseTracer(config)
 const conversations = new ConversationRepository(db)
 const memories = new MemoryRepository(db)
 const documents = new DocumentRepository(db)
-const retrieval = new RetrievalAgent(documents, new EmbeddingClient(config, tracer), new RerankerClient(config, tracer), config.RETRIEVAL_MODE, tracer)
+const retrieval = new RetrievalAgent(
+  documents,
+  new EmbeddingClient(config, tracer),
+  new RerankerClient(config, tracer),
+  config.RETRIEVAL_MODE,
+  tracer
+)
 const model = new DeepSeekClient(config, tracer)
 const answerStreams = new Map<string, AnswerDeltaBatcher>()
 type EventWriteStats = {
@@ -46,13 +52,27 @@ type EventWriteStats = {
 const eventStatsByRun = new Map<string, EventWriteStats>()
 
 function newEventWriteStats(): EventWriteStats {
-  return { count: 0, persistMs: 0, publishMs: 0, maxPersistMs: 0, maxPublishMs: 0, persistFailures: 0, publishFailures: 0 }
+  return {
+    count: 0,
+    persistMs: 0,
+    publishMs: 0,
+    maxPersistMs: 0,
+    maxPublishMs: 0,
+    persistFailures: 0,
+    publishFailures: 0,
+  }
 }
 
-function getAnswerDeltaSink(context: { runId: string; workspaceId: string; node: 'generate_answer_stream' }) {
+function getAnswerDeltaSink(context: {
+  runId: string
+  workspaceId: string
+  node: 'generate_answer_stream'
+}) {
   let sink = answerStreams.get(context.runId)
   if (!sink) {
-    sink = new AnswerDeltaBatcher(delta => event(context.runId, context.workspaceId, 'token', { node: context.node, delta }))
+    sink = new AnswerDeltaBatcher(delta =>
+      event(context.runId, context.workspaceId, 'token', { node: context.node, delta })
+    )
     answerStreams.set(context.runId, sink)
   }
   return sink
@@ -197,12 +217,18 @@ async function processMessage(
     name: 'knowledge-agent-run',
     userId: run.requestedBy,
     workspaceId: run.workspaceId,
-    conversationId: typeof run.input.conversationId === 'string' ? run.input.conversationId : undefined,
+    conversationId:
+      typeof run.input.conversationId === 'string' ? run.input.conversationId : undefined,
     model: config.DEEPSEEK_MODEL,
     promptVersion: 'v1',
     metadata: { attempt: run.attempt + 1, consumer },
   })
-  const attemptSpan = trace?.span('agent.attempt', { attempt: run.attempt + 1, consumer, resumed: resumeValue !== undefined, resumeMode })
+  const attemptSpan = trace?.span('agent.attempt', {
+    attempt: run.attempt + 1,
+    consumer,
+    resumed: resumeValue !== undefined,
+    resumeMode,
+  })
   const eventStats = newEventWriteStats()
   eventStatsByRun.set(run.id, eventStats)
   let attemptEnded = false
@@ -212,11 +238,31 @@ async function processMessage(
     attemptSpan?.end(output, { ...metadata, ...eventStatsMetadata(eventStats) })
   }
   try {
-    if (resumeValue === undefined && run.input.conversationId && typeof run.input.question === 'string') {
-      await conversations.append({ conversationId: String(run.input.conversationId), workspaceId: run.workspaceId, userId: run.requestedBy, role: 'user', content: run.input.question })
+    if (
+      resumeValue === undefined &&
+      run.input.conversationId &&
+      typeof run.input.question === 'string'
+    ) {
+      await conversations.append({
+        conversationId: String(run.input.conversationId),
+        workspaceId: run.workspaceId,
+        userId: run.requestedBy,
+        role: 'user',
+        content: run.input.question,
+      })
     }
-    if (resumeMode === 'waiting_user' && run.input.conversationId && typeof initialInput === 'string') {
-      await conversations.append({ conversationId: String(run.input.conversationId), workspaceId: run.workspaceId, userId: run.requestedBy, role: 'user', content: initialInput })
+    if (
+      resumeMode === 'waiting_user' &&
+      run.input.conversationId &&
+      typeof initialInput === 'string'
+    ) {
+      await conversations.append({
+        conversationId: String(run.input.conversationId),
+        workspaceId: run.workspaceId,
+        userId: run.requestedBy,
+        role: 'user',
+        content: initialInput,
+      })
     }
     await event(run.id, run.workspaceId, 'started', {
       attempt: run.attempt + 1,
@@ -261,19 +307,60 @@ async function processMessage(
         const state = update as Record<string, unknown> | undefined
         if (node === 'intent_recognition' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'intent_detected', { intent: decision.intent, confidence: decision.confidence, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), contextTokenCount: Number(state.contextTokenCount ?? 0), contextTruncated: state.contextTruncated === true, hasConversationSummary: state.hasConversationSummary === true, needsClarification: decision.needsClarification === true })
-          trace?.event('preference.classified', { containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, intent: decision.intent, needsRetrieval: decision.needsRetrieval })
+          await event(run.id, run.workspaceId, 'intent_detected', {
+            intent: decision.intent,
+            confidence: decision.confidence,
+            fallback: state.supervisorFallback === true,
+            containsUserPreference: decision.containsUserPreference === true,
+            preferenceOnly: decision.preferenceOnly === true,
+            contextUsed: state.contextUsed === true,
+            contextMessageCount: Number(state.contextMessageCount ?? 0),
+            contextTokenCount: Number(state.contextTokenCount ?? 0),
+            contextTruncated: state.contextTruncated === true,
+            hasConversationSummary: state.hasConversationSummary === true,
+            needsClarification: decision.needsClarification === true,
+          })
+          trace?.event('preference.classified', {
+            containsUserPreference: decision.containsUserPreference === true,
+            preferenceOnly: decision.preferenceOnly === true,
+            intent: decision.intent,
+            needsRetrieval: decision.needsRetrieval,
+          })
           workerMetric('supervisorCalls')
           if (state.supervisorFallback === true) workerMetric('supervisorFallbacks')
           if (Number(decision.confidence) === 0) workerMetric('supervisorLowConfidence')
         }
         if (node === 'supervisor_plan' && state?.supervisorDecision) {
           const decision = state.supervisorDecision as Record<string, unknown>
-          await event(run.id, run.workspaceId, 'plan_created', { plan: decision.plan, needsRetrieval: decision.needsRetrieval, fallback: state.supervisorFallback === true, containsUserPreference: decision.containsUserPreference === true, preferenceOnly: decision.preferenceOnly === true, needsClarification: decision.needsClarification === true, contextUsed: state.contextUsed === true, contextMessageCount: Number(state.contextMessageCount ?? 0), contextTokenCount: Number(state.contextTokenCount ?? 0), contextTruncated: state.contextTruncated === true, hasConversationSummary: state.hasConversationSummary === true })
-          trace?.event('preference.routing', { preferenceOnly: decision.preferenceOnly === true, needsRetrieval: decision.needsRetrieval, plan: decision.plan })
+          await event(run.id, run.workspaceId, 'plan_created', {
+            plan: decision.plan,
+            needsRetrieval: decision.needsRetrieval,
+            fallback: state.supervisorFallback === true,
+            containsUserPreference: decision.containsUserPreference === true,
+            preferenceOnly: decision.preferenceOnly === true,
+            needsClarification: decision.needsClarification === true,
+            contextUsed: state.contextUsed === true,
+            contextMessageCount: Number(state.contextMessageCount ?? 0),
+            contextTokenCount: Number(state.contextTokenCount ?? 0),
+            contextTruncated: state.contextTruncated === true,
+            hasConversationSummary: state.hasConversationSummary === true,
+          })
+          trace?.event('preference.routing', {
+            preferenceOnly: decision.preferenceOnly === true,
+            needsRetrieval: decision.needsRetrieval,
+            plan: decision.plan,
+          })
         }
-        if (node === 'validate_plan' && state?.planRejected) { await event(run.id, run.workspaceId, 'plan_rejected', { reason: 'PLAN_VALIDATION_FAILED' }); workerMetric('planRejections') }
-        if (node === 'retrieve_evidence') await event(run.id, run.workspaceId, 'retrieval_started', { mode: state?.retrieval && (state.retrieval as any).mode })
+        if (node === 'validate_plan' && state?.planRejected) {
+          await event(run.id, run.workspaceId, 'plan_rejected', {
+            reason: 'PLAN_VALIDATION_FAILED',
+          })
+          workerMetric('planRejections')
+        }
+        if (node === 'retrieve_evidence')
+          await event(run.id, run.workspaceId, 'retrieval_started', {
+            mode: state?.retrieval && (state.retrieval as any).mode,
+          })
         if (node === 'retrieve_evidence') {
           const retrieval = (state?.retrieval ?? {}) as any
           await event(run.id, run.workspaceId, 'retrieval_completed', {
@@ -284,13 +371,28 @@ async function processMessage(
             failures: retrieval.failures ?? [],
           })
         }
-        if (node === 'summarize_document' && state?.summary) await event(run.id, run.workspaceId, 'summary_completed', { citationCount: Array.isArray((state.summary as any).citations) ? (state.summary as any).citations.length : 0 })
-        if (node === 'compare_documents' && state?.comparison) await event(run.id, run.workspaceId, 'comparison_completed', { topicCount: Array.isArray((state.comparison as any).topics) ? (state.comparison as any).topics.length : 0 })
+        if (node === 'summarize_document' && state?.summary)
+          await event(run.id, run.workspaceId, 'summary_completed', {
+            citationCount: Array.isArray((state.summary as any).citations)
+              ? (state.summary as any).citations.length
+              : 0,
+          })
+        if (node === 'compare_documents' && state?.comparison)
+          await event(run.id, run.workspaceId, 'comparison_completed', {
+            topicCount: Array.isArray((state.comparison as any).topics)
+              ? (state.comparison as any).topics.length
+              : 0,
+          })
         if (node === 'persist_response' && Array.isArray(state?.citations)) {
-          for (const citation of state.citations) await event(run.id, run.workspaceId, 'citation', { citation })
+          for (const citation of state.citations)
+            await event(run.id, run.workspaceId, 'citation', { citation })
         }
         if (node === 'extract_memory_candidates' && Array.isArray(state?.memoryCandidates)) {
-          for (const candidate of state.memoryCandidates) await event(run.id, run.workspaceId, 'memory_candidate', { summary: (candidate as any).summary, sensitivity: (candidate as any).sensitivity })
+          for (const candidate of state.memoryCandidates)
+            await event(run.id, run.workspaceId, 'memory_candidate', {
+              summary: (candidate as any).summary,
+              sensitivity: (candidate as any).sensitivity,
+            })
         }
         const delta =
           typeof state?.output === 'string'
@@ -314,7 +416,11 @@ async function processMessage(
     }
     if (interrupt) {
       await flushAnswerStream(run.id)
-      if (interrupt.kind === 'question' && run.input.conversationId && typeof interrupt.question === 'string') {
+      if (
+        interrupt.kind === 'question' &&
+        run.input.conversationId &&
+        typeof interrupt.question === 'string'
+      ) {
         try {
           await conversations.append({
             conversationId: String(run.input.conversationId),
@@ -339,7 +445,12 @@ async function processMessage(
         )
       } else await repository.markWaitingUser(run.id)
       workerMetric('agentsInterrupted')
-      trace?.update({ status: 'waiting', statusMessage: interrupt.kind === 'approval' ? 'waiting_approval' : 'waiting_user', attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
+      trace?.update({
+        status: 'waiting',
+        statusMessage: interrupt.kind === 'approval' ? 'waiting_approval' : 'waiting_user',
+        attempt: run.attempt + 1,
+        metadata: eventStatsMetadata(eventStats),
+      })
       endAttempt(undefined, { status: 'waiting', interruptKind: interrupt.kind })
       await tracer.flushAsync()
       return 'waiting'
@@ -347,7 +458,12 @@ async function processMessage(
     await flushAnswerStream(run.id)
     await repository.markCompleted(run.id)
     await event(run.id, run.workspaceId, 'completed', { output: output ?? null })
-    trace?.update({ status: 'completed', output: { status: 'completed', answerLength: output?.length ?? 0 }, attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
+    trace?.update({
+      status: 'completed',
+      output: { status: 'completed', answerLength: output?.length ?? 0 },
+      attempt: run.attempt + 1,
+      metadata: eventStatsMetadata(eventStats),
+    })
     endAttempt({ status: 'completed', answerLength: output?.length ?? 0 })
     workerMetric('agentsCompleted')
     return 'completed'
@@ -357,7 +473,12 @@ async function processMessage(
       await repository.markInterrupted(run.id)
       await event(run.id, run.workspaceId, 'interrupt', { reason: 'user_cancelled' })
       workerMetric('agentsInterrupted')
-      trace?.update({ status: 'interrupted', statusMessage: 'user_cancelled', attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
+      trace?.update({
+        status: 'interrupted',
+        statusMessage: 'user_cancelled',
+        attempt: run.attempt + 1,
+        metadata: eventStatsMetadata(eventStats),
+      })
       endAttempt(undefined, { status: 'interrupted', reason: 'user_cancelled' })
       await tracer.flushAsync()
       return 'interrupted'
@@ -371,16 +492,32 @@ async function processMessage(
     if (next?.status === 'queued') {
       await repository.enqueueRetry(run.id, 2 ** Math.max(0, next.attempt - 1) * 1000)
       workerMetric('agentsRetried')
-      trace?.update({ status: 'retrying', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: next.attempt, metadata: eventStatsMetadata(eventStats) })
-      endAttempt(undefined, { status: 'retryable', error: error instanceof Error ? error.message : 'Agent run failed' })
+      trace?.update({
+        status: 'retrying',
+        statusMessage: error instanceof Error ? error.message : 'Agent run failed',
+        attempt: next.attempt,
+        metadata: eventStatsMetadata(eventStats),
+      })
+      endAttempt(undefined, {
+        status: 'retryable',
+        error: error instanceof Error ? error.message : 'Agent run failed',
+      })
       await tracer.flushAsync()
       return 'retryable'
     }
     await event(run.id, run.workspaceId, 'failed', { code: 'AGENT_ERROR' })
     await deadLetter(run.id, message.id)
     workerMetric('agentsFailed')
-    trace?.update({ status: 'failed', statusMessage: error instanceof Error ? error.message : 'Agent run failed', attempt: run.attempt + 1, metadata: eventStatsMetadata(eventStats) })
-    endAttempt(undefined, { status: 'failed', error: error instanceof Error ? error.message : 'Agent run failed' })
+    trace?.update({
+      status: 'failed',
+      statusMessage: error instanceof Error ? error.message : 'Agent run failed',
+      attempt: run.attempt + 1,
+      metadata: eventStatsMetadata(eventStats),
+    })
+    endAttempt(undefined, {
+      status: 'failed',
+      error: error instanceof Error ? error.message : 'Agent run failed',
+    })
     await tracer.flushAsync()
     return 'dead_lettered'
   } finally {

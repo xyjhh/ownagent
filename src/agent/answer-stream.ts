@@ -22,11 +22,14 @@ export class AnswerDeltaBatcher implements AnswerDeltaSink {
   private readonly setTimer: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>
   private readonly clearTimer: (timer: ReturnType<typeof setTimeout>) => void
 
-  constructor(private readonly emit: AnswerDeltaEmitter, options: AnswerDeltaBatcherOptions = {}) {
+  constructor(
+    private readonly emit: AnswerDeltaEmitter,
+    options: AnswerDeltaBatcherOptions = {}
+  ) {
     this.intervalMs = options.intervalMs ?? 50
     this.maxChars = options.maxChars ?? 240
     this.setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay))
-    this.clearTimer = options.clearTimer ?? ((timer) => clearTimeout(timer))
+    this.clearTimer = options.clearTimer ?? (timer => clearTimeout(timer))
   }
 
   async push(delta: string): Promise<void> {
