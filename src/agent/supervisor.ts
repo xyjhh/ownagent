@@ -117,6 +117,7 @@ function normalizeSupervisorDecision(value: unknown): unknown {
 
 const supervisorDecisionObjectSchema = z
   .object({
+    // 用户请求的业务意图，决定后续图节点的分支。
     intent: z.enum([
       'knowledge_query',
       'document_summary',
@@ -124,18 +125,26 @@ const supervisorDecisionObjectSchema = z
       'general_chat',
       'preference_update',
     ]),
+    // 是否需要执行知识库检索；validate_plan 会校验它与 search_knowledge 计划步骤一致。
     needsRetrieval: z.boolean(),
+    // Supervisor 改写后的检索问题，供 retrieve_evidence 使用。
     query: z.string().max(4000).optional(),
+    // 需要读取或比较的文档 ID，后续还会进行 Workspace 和用户权限校验。
     documentIds: z.array(z.string().uuid()).max(20).optional(),
+    // 本次请求允许执行的步骤，顺序表达预期流程。
     plan: z
       .array(z.enum(['search_knowledge', 'get_document', 'compare_documents', 'generate_answer']))
       .min(1)
       .max(4),
+    // 是否在继续执行前暂停并等待人工审批。
     requiresApproval: z.boolean(),
     confidence: z.number().min(0).max(1),
     reason: z.string().max(500).optional(),
+    // 当前请求是否存在歧义或缺少必要信息，需要先向用户提问。
     needsClarification: z.boolean().default(false),
+    // 澄清问题的文本；needsClarification 为 true 时必须提供。
     clarificationQuestion: z.string().trim().min(1).max(1000).optional(),
+    // 可选的澄清选项，供前端展示；用户仍可自由输入。
     clarificationOptions: z.array(z.string().trim().min(1).max(200)).max(6).optional(),
     containsUserPreference: z.boolean().default(false),
     preferenceOnly: z.boolean().default(false),

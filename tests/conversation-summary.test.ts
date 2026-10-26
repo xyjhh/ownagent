@@ -16,21 +16,26 @@ const message = (id: string, content: string) => ({
 })
 
 describe('conversation summary batching', () => {
-  it('uses a stable conservative estimate for mixed Chinese and Latin text', () => {
+  it('uses the configured tiktoken estimate for mixed Chinese and Latin text', () => {
     expect(estimateSummaryTokens('你好')).toBe(2)
     expect(estimateSummaryTokens('abcd')).toBe(1)
-    expect(estimateSummaryTokens('你好 abcd')).toBe(3)
-    expect(estimateSummaryMessageTokens(message('m1', '你好 abcd'))).toBeGreaterThan(3)
+    expect(estimateSummaryTokens('你好 abcd')).toBe(4)
+    expect(estimateSummaryMessageTokens(message('m1', '你好 abcd'))).toBeGreaterThan(4)
   })
 
-  it('does not classify Japanese kana or Korean characters as Chinese', () => {
+  it('counts Japanese kana and Korean characters with the configured tokenizer', () => {
     expect(estimateSummaryTokens('かな')).toBe(2)
-    expect(estimateSummaryTokens('한국')).toBe(2)
+    expect(estimateSummaryTokens('한국')).toBe(3)
   })
 
   it('splits messages in chronological order and always includes one message', () => {
     const messages = [message('m1', '第一条'), message('m2', '第二条'), message('m3', '第三条')]
-    const first = takeSummaryBatch(messages, '', 205)
+    const firstTwoBudget =
+      estimateSummaryTokens('') +
+      160 +
+      estimateSummaryMessageTokens(messages[0]!) +
+      estimateSummaryMessageTokens(messages[1]!)
+    const first = takeSummaryBatch(messages, '', firstTwoBudget)
     expect(first.batch.map(item => item.id)).toEqual(['m1', 'm2'])
     expect(first.remaining.map(item => item.id)).toEqual(['m3'])
     const second = takeSummaryBatch(first.remaining, '已有摘要', 205)

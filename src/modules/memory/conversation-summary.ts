@@ -8,7 +8,7 @@ export type SummaryMessage = Pick<
   'id' | 'role' | 'content' | 'createdAt' | 'citations'
 >
 
-/** Conservative, deterministic estimate used only for batching prompts. */
+/** Deterministic token estimate used only for batching prompts. */
 export const estimateSummaryTokens = estimateTextTokens
 
 export function summaryMessagePayload(message: SummaryMessage) {

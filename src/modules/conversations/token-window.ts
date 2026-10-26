@@ -1,4 +1,7 @@
 import type { ConversationMessage } from './repository.js'
+import { getEncoding } from 'js-tiktoken'
+
+const tokenEncoder = getEncoding('cl100k_base')
 
 export type TokenWindowResult = {
   messages: ConversationMessage[]
@@ -7,24 +10,11 @@ export type TokenWindowResult = {
   truncated: boolean
 }
 
-const chineseHanPattern = /[\u3400-\u4dbf\u4e00-\u9fff\u{20000}-\u{2fa1f}]/u
-const englishOrDigitPattern = /[A-Za-z0-9]/u
-const punctuationPattern = /[\p{P}\p{S}]/u
 const truncationMarker = '…[内容已截断]…'
 
-/** Conservative, deterministic estimate used for context-window budgeting. */
+/** Deterministic token estimate used for context-window budgeting. */
 export function estimateTextTokens(value: string): number {
-  let chinese = 0
-  let latinOrPunctuation = 0
-  let unsupported = 0
-  for (const character of Array.from(value)) {
-    if (chineseHanPattern.test(character)) chinese += 1
-    else if (/\s/u.test(character)) continue
-    else if (englishOrDigitPattern.test(character) || punctuationPattern.test(character))
-      latinOrPunctuation += 1
-    else unsupported += 1
-  }
-  return Math.max(1, chinese + Math.ceil(latinOrPunctuation / 4) + unsupported)
+  return Math.max(1, tokenEncoder.encode(value).length)
 }
 
 function messagePayload(message: ConversationMessage) {
