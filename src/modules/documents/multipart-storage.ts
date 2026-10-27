@@ -11,9 +11,11 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 export type MultipartPart = { partNumber: number; etag: string }
 export class SupabaseMultipartStorage {
   private readonly client: S3Client
+  private readonly signingClient: S3Client
   constructor(
     private readonly config: {
       SUPABASE_S3_ENDPOINT?: string
+      SUPABASE_S3_PUBLIC_ENDPOINT?: string
       SUPABASE_S3_ACCESS_KEY?: string
       SUPABASE_S3_SECRET_KEY?: string
       SUPABASE_S3_REGION?: string
@@ -25,15 +27,18 @@ export class SupabaseMultipartStorage {
       !config.SUPABASE_S3_SECRET_KEY
     )
       throw new Error('S3_UPLOAD_NOT_CONFIGURED')
-    this.client = new S3Client({
-      endpoint: config.SUPABASE_S3_ENDPOINT,
+    const clientConfig = {
       region: config.SUPABASE_S3_REGION ?? 'local',
       forcePathStyle: true,
       credentials: {
         accessKeyId: config.SUPABASE_S3_ACCESS_KEY,
         secretAccessKey: config.SUPABASE_S3_SECRET_KEY,
       },
-    })
+    }
+    this.client = new S3Client({ ...clientConfig, endpoint: config.SUPABASE_S3_ENDPOINT })
+    this.signingClient = config.SUPABASE_S3_PUBLIC_ENDPOINT
+      ? new S3Client({ ...clientConfig, endpoint: config.SUPABASE_S3_PUBLIC_ENDPOINT })
+      : this.client
   }
   async initiate(bucket: string, key: string, contentType: string) {
     const result = await this.client.send(
@@ -44,7 +49,7 @@ export class SupabaseMultipartStorage {
   }
   async signPart(bucket: string, key: string, uploadId: string, partNumber: number) {
     return getSignedUrl(
-      this.client,
+      this.signingClient,
       new UploadPartCommand({
         Bucket: bucket,
         Key: key,

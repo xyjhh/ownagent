@@ -52,7 +52,7 @@ foreach ($service in $services) {
   }
 }
 
-docker compose stop redis
+docker compose stop ownagent-redis
 if ($LASTEXITCODE -ne 0) {
   throw 'Unable to stop the OwnAgent Redis container.'
 }

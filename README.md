@@ -45,13 +45,12 @@ flowchart TD
 
 - Node.js 20 或更高版本
 - npm
-- Docker，用于本地 Redis；也可以连接已有 Redis
-- Supabase/PostgreSQL 项目，并启用 Supabase Storage（文档文件存储需要）
+- Docker Desktop 与 Docker Compose v2
 - DeepSeek API（Agent Supervisor 和回答生成）
 - 可访问的 OpenAI-compatible Embedding 服务
 - 阿里云百炼 DashScope Reranker API
 
-## 本地配置与启动
+## 本地开发配置与启动
 
 复制环境变量模板：
 
@@ -93,22 +92,36 @@ npm run dev:document-worker
 npm run dev:memory-worker
 ```
 
-也可以用 Docker Compose 运行应用服务：
+生产部署使用根目录的单一 Docker Compose 项目。前端位于同级目录 `../ownagentweb`，由 Compose 构建为静态站点；项目包含 OwnAgent 的前端、API/Worker、Supabase 数据库、Auth、REST、Storage、Realtime、Edge Functions、Studio、Langfuse、Caddy 和 Cloudflare Tunnel。DeepSeek、DashScope 和远程 Embedding 仍然是外部 API。
 
 ```powershell
-npm run start:all:docker
-npm run stop:all:docker
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
+# 填写 PUBLIC_BASE_URL、CLOUDFLARE_TUNNEL_TOKEN、ADMIN_EMAIL、ADMIN_PASSWORD 和模型密钥
+npm run init:compose
 ```
 
-Compose 中的应用容器通过 `host.docker.internal` 连接本机 Supabase/PostgreSQL 和 Embedding 服务，Redis 则连接 Compose 内的 `redis` 服务。若本机 Embedding 使用 DirectML，可使用仓库脚本管理它：
+先在 Cloudflare Tunnel Dashboard 将公网 hostname 的服务目标设为 `http://caddy:80`。`PUBLIC_BASE_URL` 使用该 hostname 的 HTTPS 地址。初始化脚本会生成新的 Supabase/Langfuse 基础设施密钥，清空本项目旧 Supabase、Langfuse 和 OwnAgent Redis 数据卷，启动全新 Compose 服务，依序执行 `supabase/migrations/` 的全部 SQL，并创建 `.env` 中指定的首位管理员。
+
+初始化会删除旧数据且不会创建备份。运行前确认旧数据不再需要；脚本会要求输入 `DELETE OLD DATA` 才会继续。它只删除当前 Supabase CLI 项目、Langfuse 项目和 OwnAgent Compose 使用的明确卷名，不会删除 Docker 中其他 Supabase 项目的卷。不要使用 `docker compose down -v`。
+
+停止服务：
 
 ```powershell
-npm run models:start
-npm run models:status
-npm run models:stop
+docker compose down
 ```
 
-脚本只管理本机 `Qwen3-Embedding-0.6B` 服务（默认 `127.0.0.1:8002`）。Reranker 由 DashScope API 提供，不需要本机启动或管理模型服务。可用 `OWNAGENT_EMBEDDING_SERVICE_DIR` 指定 Embedding 服务目录。
+初始化完成后，API 使用 Compose 内部的 `kong`、`db` 和 `ownagent-redis` 地址；浏览器收到的 TUS 和 S3 multipart 上传 URL 使用 `SUPABASE_PUBLIC_URL`/`SUPABASE_S3_PUBLIC_ENDPOINT`。Caddy 将 `/api/*`、`/ws`、`/health/*` 转发到 OwnAgent，将 Supabase 的 `/auth/v1/*`、`/rest/v1/*`、`/graphql/v1`、`/storage/v1/*`、`/realtime/v1/*` 和 `/functions/v1/*` 转发到 Kong，其余页面路径转发到前端容器。Tunnel 只连接 Caddy，不直接暴露数据库、Redis 或 Storage 容器。
+
+前端 Docker 构建上下文要求 `E:\project\ownagentweb` 与本仓库 `E:\project\ownagent` 保持同级。前端通过 `/api` 和 `/ws` 使用同一 hostname，因此 HTTPS 部署会自动使用安全 WebSocket。修改前端后，在本仓库运行 `docker compose up -d --build frontend caddy` 重新构建并加载。
+
+Langfuse UI 仅在本机 `http://127.0.0.1:3001` 开放；Supabase Studio 仅在本机 `http://127.0.0.1:54323` 开放。日常备份：
+
+```powershell
+npm run backup:compose
+```
+
+备份目录包含 `supabase.sql` 和 `supabase-storage.tar.gz`。恢复时先停止 Compose，再将 SQL 导入目标 PostgreSQL；将 Storage 归档解压到一个新的空卷后，再以该卷启动服务。全新初始化后，这些备份不会自动恢复。
 
 ## Agent 与检索配置
 
@@ -118,7 +131,7 @@ npm run models:stop
 | --- | --- | --- |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | Agent 生成与结构化模型调用 |
 | `SUPERVISOR_MODEL` | 跟随应用默认模型 | Supervisor 模型覆盖 |
-| `EMBEDDING_MODEL` | `Qwen3-Embedding-0.6B` | 文档、查询与记忆向量模型 |
+| `EMBEDDING_MODEL` | `qwen3.7-text-embedding-flash` | 文档、查询与记忆向量模型 |
 | `RERANK_MODEL` | `qwen3.7-text-rerank` | DashScope 文本重排模型 |
 | `RETRIEVAL_MODE` | `hybrid` | `hybrid` 或仅 `vector` 候选召回 |
 | `CONVERSATION_RECENT_TOKENS` | `4000` | Supervisor 最近会话消息窗口 |
@@ -168,5 +181,5 @@ npm test
 
 - `SUPABASE_SERVICE_ROLE_KEY`、`AUTH_JWT_SECRET`、`DASHSCOPE_API_KEY`、数据库和对象存储密钥只配置在服务端。
 - 生产环境启用 HTTPS，并将 `AUTH_COOKIE_SECURE=true`；配置准确的 `WEB_ORIGIN` 和 Cookie SameSite 策略。
-- 首次部署和升级前确认 Supabase 项目、备份和未执行迁移；启动命令不会替你修改数据库结构。
+- 首次全新部署前确认旧数据已不再需要；`npm run init:compose` 会在确认后删除指定旧卷并执行全部 OwnAgent migrations。
 - Redis 使用 `noeviction` 以避免任务静默丢失。Outbox 中未发布任务会在 Dispatcher 启动或数据库重连时重新扫描。

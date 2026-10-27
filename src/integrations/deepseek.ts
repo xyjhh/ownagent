@@ -4,10 +4,7 @@ import type { LangfuseTracer, TraceContext } from '../observability/langfuse.js'
 import { ZodError, type ZodSchema } from 'zod'
 
 export type StructuredModelErrorCode =
-  | 'MODEL_TIMEOUT'
-  | 'MODEL_INVALID_JSON'
-  | 'MODEL_SCHEMA_INVALID'
-  | 'MODEL_UNAVAILABLE'
+  'MODEL_TIMEOUT' | 'MODEL_INVALID_JSON' | 'MODEL_SCHEMA_INVALID' | 'MODEL_UNAVAILABLE'
 export class StructuredModelError extends Error {
   constructor(
     public readonly code: StructuredModelErrorCode,
@@ -22,6 +19,11 @@ export class StructuredModelError extends Error {
 export type ChatMessage = { role: 'system' | 'user' | 'assistant'; content: string }
 export type ChatCompletion = { id: string; choices: Array<{ message: ChatMessage }> }
 export type ModelTraceOptions = { trace?: TraceContext; operation?: string; attempt?: number }
+export type ChatToolDefinition = {
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+}
 
 function parseStructuredContent(content: string): unknown {
   const trimmed = content.trim()
@@ -165,6 +167,103 @@ export class DeepSeekClient {
       message,
       { cause: lastError }
     )
+  }
+
+  async chatToolJson<T>(
+    messages: ChatMessage[],
+    schema: ZodSchema<T>,
+    tool: ChatToolDefinition,
+    options: { model?: string; timeoutMs?: number } & ModelTraceOptions = {}
+  ): Promise<T> {
+    const model = options.model ?? this.config.DEEPSEEK_MODEL
+    const generation =
+      options.trace &&
+      this.tracer?.startGeneration(
+        options.trace,
+        options.operation ?? 'deepseek.chat_tool',
+        messages,
+        {
+          model,
+          attempt: options.attempt ?? 0,
+          timeoutMs: options.timeoutMs ?? this.config.MODEL_TIMEOUT_MS,
+          toolName: tool.name,
+        }
+      )
+    try {
+      if (!this.config.DEEPSEEK_API_KEY)
+        throw new StructuredModelError('MODEL_UNAVAILABLE', 'DeepSeek API key is not configured')
+      const response = await fetchJson<{
+        choices?: Array<{
+          message?: {
+            tool_calls?: Array<{
+              type?: string
+              function?: { name?: string; arguments?: string | Record<string, unknown> }
+            }>
+          }
+        }>
+      }>(
+        `${this.config.DEEPSEEK_BASE_URL}/chat/completions`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.config.DEEPSEEK_API_KEY}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            tools: [
+              {
+                type: 'function',
+                function: {
+                  name: tool.name,
+                  description: tool.description,
+                  parameters: tool.parameters,
+                },
+              },
+            ],
+            tool_choice: { type: 'function', function: { name: tool.name } },
+          }),
+        },
+        options.timeoutMs ?? this.config.MODEL_TIMEOUT_MS
+      )
+      const call = response.choices?.[0]?.message?.tool_calls?.find(
+        item => item.type === 'function' && item.function?.name === tool.name
+      )
+      if (!call?.function?.arguments)
+        throw new StructuredModelError(
+          'MODEL_INVALID_JSON',
+          `Model did not call the required tool: ${tool.name}`
+        )
+      let parsed: unknown
+      try {
+        parsed =
+          typeof call.function.arguments === 'string'
+            ? JSON.parse(call.function.arguments)
+            : call.function.arguments
+      } catch (error) {
+        throw new StructuredModelError('MODEL_INVALID_JSON', 'Tool arguments are not valid JSON', {
+          cause: error,
+        })
+      }
+      let result: T
+      try {
+        result = schema.parse(parsed)
+      } catch (error) {
+        const detail =
+          error instanceof ZodError ? error.issues[0]?.message : 'invalid tool arguments'
+        throw new StructuredModelError(
+          'MODEL_SCHEMA_INVALID',
+          `Tool arguments failed schema validation: ${detail}`,
+          { cause: error }
+        )
+      }
+      generation?.end(result, { model, toolName: tool.name })
+      return result
+    } catch (error) {
+      generation?.fail(error, { model, toolName: tool.name })
+      throw error
+    }
   }
 
   async *streamChat(

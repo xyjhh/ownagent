@@ -1,12 +1,7 @@
 export type ProviderUploadStatus = 'uploading' | 'completed' | 'aborted'
 
 export interface ResumableStorage {
-  initiate(input: {
-    bucket: string
-    key: string
-    contentType: string
-    size: number
-  }): Promise<{
+  initiate(input: { bucket: string; key: string; contentType: string; size: number }): Promise<{
     providerUploadId: string
     uploadUrl: string
     offset: number
@@ -27,15 +22,18 @@ export interface ResumableStorage {
 
 export class SupabaseResumableStorage implements ResumableStorage {
   private readonly base: string
+  private readonly publicBase: string
   private readonly token: string
   constructor(
     private readonly config: {
       SUPABASE_URL: string
+      SUPABASE_PUBLIC_URL?: string
       SUPABASE_SERVICE_ROLE_KEY: string
       SUPABASE_STORAGE_UPLOAD_TOKEN?: string
     }
   ) {
     this.base = `${config.SUPABASE_URL.replace(/\/$/, '')}/storage/v1`
+    this.publicBase = `${(config.SUPABASE_PUBLIC_URL ?? config.SUPABASE_URL).replace(/\/$/, '')}/storage/v1`
     this.token = config.SUPABASE_STORAGE_UPLOAD_TOKEN ?? ''
     if (this.token && this.token === config.SUPABASE_SERVICE_ROLE_KEY) {
       throw new Error('STORAGE_UPLOAD_TOKEN_MUST_NOT_BE_SERVICE_ROLE_KEY')
@@ -46,7 +44,7 @@ export class SupabaseResumableStorage implements ResumableStorage {
   }
   resumeDetails(providerUploadId: string) {
     return {
-      uploadUrl: `${this.base}/upload/resumable/${encodeURIComponent(providerUploadId)}`,
+      uploadUrl: `${this.publicBase}/upload/resumable/${encodeURIComponent(providerUploadId)}`,
       uploadHeaders: this.headers({ 'Tus-Resumable': '1.0.0' }),
     }
   }
@@ -68,10 +66,18 @@ export class SupabaseResumableStorage implements ResumableStorage {
     const providerUploadId = location.split('/').pop() ?? location
     return {
       providerUploadId,
-      uploadUrl: new URL(location, this.base).toString(),
+      uploadUrl: this.publicLocation(location),
       offset: Number(response.headers.get('Upload-Offset') ?? 0),
       uploadHeaders: this.headers({ 'Tus-Resumable': '1.0.0' }),
     }
+  }
+  private publicLocation(location: string) {
+    const internalLocation = new URL(location, this.base)
+    const publicLocation = new URL(this.publicBase)
+    publicLocation.pathname = internalLocation.pathname
+    publicLocation.search = internalLocation.search
+    publicLocation.hash = internalLocation.hash
+    return publicLocation.toString()
   }
   async getStatus(input: { bucket: string; key: string; providerUploadId: string }) {
     const url = `${this.base}/upload/resumable/${encodeURIComponent(input.providerUploadId)}`

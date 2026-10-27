@@ -30,11 +30,83 @@ describe('DeepSeek structured output', () => {
     const result = await new DeepSeekClient(config).chatJson(
       [{ role: 'user', content: 'return JSON' }],
       z.object({ value: z.literal('ok') }),
-      { maxRetries: 1 },
+      { maxRetries: 1 }
     )
     expect(result).toEqual({ value: 'ok' })
     expect(fetchMock).toHaveBeenCalledTimes(2)
     const secondBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))
     expect(secondBody.messages.at(-1).content).toContain('上一次输出未通过结构校验')
+  })
+
+  it('returns arguments from the forced function call without retrying', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              tool_calls: [
+                {
+                  type: 'function',
+                  function: { name: 'submit_decision', arguments: '{"value":"ok"}' },
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      requestBody: JSON.parse(String(init?.body)),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await new DeepSeekClient(config).chatToolJson(
+      [{ role: 'user', content: 'classify' }],
+      z.object({ value: z.literal('ok') }),
+      {
+        name: 'submit_decision',
+        description: 'Submit decision',
+        parameters: {
+          type: 'object',
+          properties: { value: { type: 'string', enum: ['ok'] } },
+          required: ['value'],
+          additionalProperties: false,
+        },
+      }
+    )
+
+    expect(result).toEqual({ value: 'ok' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body.tool_choice).toEqual({
+      type: 'function',
+      function: { name: 'submit_decision' },
+    })
+  })
+
+  it('fails invalid tool arguments after one model call', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              tool_calls: [
+                { type: 'function', function: { name: 'submit_decision', arguments: '{bad' } },
+              ],
+            },
+          },
+        ],
+      }),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      new DeepSeekClient(config).chatToolJson(
+        [{ role: 'user', content: 'classify' }],
+        z.object({ value: z.literal('ok') }),
+        { name: 'submit_decision', description: 'Submit decision', parameters: { type: 'object' } }
+      )
+    ).rejects.toMatchObject({ code: 'MODEL_INVALID_JSON' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

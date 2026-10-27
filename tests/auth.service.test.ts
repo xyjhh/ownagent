@@ -13,21 +13,65 @@ const config: AppConfig = {
   AUTH_JWT_SECRET: 'a'.repeat(40),
   AUTH_JWT_ISSUER: 'ownagent',
   AUTH_JWT_AUDIENCE: 'ownagent-api',
-  AUTH_COOKIE_ACCESS_NAME: 'ownagent_access', AUTH_COOKIE_REFRESH_NAME: 'ownagent_refresh', AUTH_COOKIE_SECURE: false, AUTH_COOKIE_SAMESITE: 'lax',
+  AUTH_COOKIE_ACCESS_NAME: 'ownagent_access',
+  AUTH_COOKIE_REFRESH_NAME: 'ownagent_refresh',
+  AUTH_COOKIE_SECURE: false,
+  AUTH_COOKIE_SAMESITE: 'lax',
   ACCESS_TOKEN_TTL: '15m',
   REFRESH_TOKEN_TTL: '30d',
   DEEPSEEK_API_KEY: '',
   DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
   DEEPSEEK_MODEL: 'deepseek-chat',
-  EMBEDDING_BASE_URL: 'http://127.0.0.1:8002/v1',
-  EMBEDDING_MODEL: 'Qwen3-Embedding-0.6B',
+  EMBEDDING_BASE_URL: 'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+  EMBEDDING_MODEL: 'qwen3.7-text-embedding-flash',
   DASHSCOPE_REGION: 'cn-beijing',
   RERANK_MODEL: 'qwen3.7-text-rerank',
   RERANK_INSTRUCT: 'retrieve relevant passages',
-  MODEL_TIMEOUT_MS: 50, MEMORY_AUTO_SAVE_LOW_RISK: true, MEMORY_CONFIRM_SENSITIVE: true, MEMORY_MAX_ITEMS_PER_CONTEXT: 20, CONVERSATION_RECENT_TOKENS: 4000, CONVERSATION_SUMMARY_THRESHOLD: 30, CONVERSATION_SUMMARY_INPUT_TOKENS: 6000, CONVERSATION_SUMMARY_OUTPUT_TOKENS: 1600, AGENT_MAX_EVIDENCE: 8, AGENT_MAX_CONTEXT_TOKENS: 12000, RETRIEVAL_MODE: 'hybrid', WS_HEARTBEAT_INTERVAL_MS: 30000, WS_MAX_FRAME_BYTES: 256000, WS_MAX_CONNECTIONS: 1000,
-  SUPERVISOR_MODEL: 'deepseek-chat', SUPERVISOR_TIMEOUT_MS: 10000, SUPERVISOR_MAX_RETRIES: 1, SUPERVISOR_CONFIDENCE_THRESHOLD: 0.65,
+  MODEL_TIMEOUT_MS: 50,
+  MEMORY_AUTO_SAVE_LOW_RISK: true,
+  MEMORY_CONFIRM_SENSITIVE: true,
+  MEMORY_MAX_ITEMS_PER_CONTEXT: 20,
+  CONVERSATION_RECENT_TOKENS: 4000,
+  CONVERSATION_SUMMARY_THRESHOLD: 30,
+  CONVERSATION_SUMMARY_INPUT_TOKENS: 6000,
+  CONVERSATION_SUMMARY_OUTPUT_TOKENS: 1600,
+  AGENT_MAX_EVIDENCE: 8,
+  AGENT_MAX_CONTEXT_TOKENS: 12000,
+  RETRIEVAL_MODE: 'hybrid',
+  WS_HEARTBEAT_INTERVAL_MS: 30000,
+  WS_MAX_FRAME_BYTES: 256000,
+  WS_MAX_CONNECTIONS: 1000,
+  SUPERVISOR_MODEL: 'deepseek-chat',
+  SUPERVISOR_TIMEOUT_MS: 10000,
+  SUPERVISOR_MAX_RETRIES: 1,
+  SUPERVISOR_CONFIDENCE_THRESHOLD: 0.65,
   REDIS_STREAM_CONTROLS: 'ownagent:agent-controls',
-  REDIS_URL: 'redis://127.0.0.1:6379', REDIS_MAXMEMORY: '512mb', REDIS_MAXMEMORY_POLICY: 'noeviction', REDIS_DEAD_LETTER_MAXLEN: 10000, REDIS_OUTBOX_RETRY_BASE_MS: 1000, REDIS_OUTBOX_RETRY_MAX_MS: 60000, REDIS_RECLAIM_IDLE_MS: 300000, REDIS_STREAM_AGENT: 'ownagent:agent-runs', REDIS_STREAM_INGEST: 'ownagent:document-ingest', REDIS_STREAM_DOCUMENT_INGEST: 'ownagent:document-ingest', REDIS_STREAM_DOCUMENT_DEAD_LETTER: 'ownagent:document-dead-letter', REDIS_STREAM_DEAD_LETTER: 'ownagent:dead-letter', REDIS_CONSUMER_GROUP: 'ownagent-workers', WORKER_CONCURRENCY: 4, CONTROL_CONCURRENCY: 2, INGEST_CONCURRENCY: 2, INGEST_MAX_ATTEMPTS: 5, INGEST_TIMEOUT_MS: 600000, DOCUMENT_MAX_FILE_SIZE_BYTES: 52428800, WORKER_SHUTDOWN_TIMEOUT_MS: 30000, WORKER_MAX_ATTEMPTS: 5, LANGFUSE_TRACING: false, LANGFUSE_BASE_URL: 'http://127.0.0.1:3001', LANGFUSE_PROJECT: 'ownagent', LANGFUSE_DEBUG_CONTENT: false, LANGFUSE_CAPTURE_CONTENT: false,
+  REDIS_URL: 'redis://127.0.0.1:6379',
+  REDIS_MAXMEMORY: '512mb',
+  REDIS_MAXMEMORY_POLICY: 'noeviction',
+  REDIS_DEAD_LETTER_MAXLEN: 10000,
+  REDIS_OUTBOX_RETRY_BASE_MS: 1000,
+  REDIS_OUTBOX_RETRY_MAX_MS: 60000,
+  REDIS_RECLAIM_IDLE_MS: 300000,
+  REDIS_STREAM_AGENT: 'ownagent:agent-runs',
+  REDIS_STREAM_INGEST: 'ownagent:document-ingest',
+  REDIS_STREAM_DOCUMENT_INGEST: 'ownagent:document-ingest',
+  REDIS_STREAM_DOCUMENT_DEAD_LETTER: 'ownagent:document-dead-letter',
+  REDIS_STREAM_DEAD_LETTER: 'ownagent:dead-letter',
+  REDIS_CONSUMER_GROUP: 'ownagent-workers',
+  WORKER_CONCURRENCY: 4,
+  CONTROL_CONCURRENCY: 2,
+  INGEST_CONCURRENCY: 2,
+  INGEST_MAX_ATTEMPTS: 5,
+  INGEST_TIMEOUT_MS: 600000,
+  DOCUMENT_MAX_FILE_SIZE_BYTES: 52428800,
+  WORKER_SHUTDOWN_TIMEOUT_MS: 30000,
+  WORKER_MAX_ATTEMPTS: 5,
+  LANGFUSE_TRACING: false,
+  LANGFUSE_BASE_URL: 'http://127.0.0.1:3001',
+  LANGFUSE_PROJECT: 'ownagent',
+  LANGFUSE_DEBUG_CONTENT: false,
+  LANGFUSE_CAPTURE_CONTENT: false,
 }
 
 class FakeRepository implements AuthRepository {
@@ -35,23 +79,57 @@ class FakeRepository implements AuthRepository {
   tokens = new Map<string, RefreshTokenRecord>()
   operations: string[] = []
   lastLogin = ''
-  async findUserByEmail(email: string) { return [...this.users.values()].find(user => user.email === email) ?? null }
-  async findUserById(id: string) { return this.users.get(id) ?? null }
+  async findUserByEmail(email: string) {
+    return [...this.users.values()].find(user => user.email === email) ?? null
+  }
+  async findUserById(id: string) {
+    return this.users.get(id) ?? null
+  }
   async createUser(input: { email: string; passwordHash: string }) {
-    const user: UserRecord = { id: crypto.randomUUID(), email: input.email, passwordHash: input.passwordHash, isActive: true, lastLoginAt: null, createdAt: new Date().toISOString() }
+    const user: UserRecord = {
+      id: crypto.randomUUID(),
+      email: input.email,
+      passwordHash: input.passwordHash,
+      isActive: true,
+      lastLoginAt: null,
+      createdAt: new Date().toISOString(),
+    }
     this.users.set(user.id, user)
     return user
   }
-  async updateLastLogin(id: string, at: string) { this.lastLogin = id; const user = this.users.get(id)!; user.lastLoginAt = at }
-  async findRefreshTokenByHash(hash: string) { return [...this.tokens.values()].find(token => token.tokenHash === hash) ?? null }
-  async createRefreshToken(input: { id: string; familyId: string; userId: string; tokenHash: string; expiresAt: string }) {
+  async updateLastLogin(id: string, at: string) {
+    this.lastLogin = id
+    const user = this.users.get(id)!
+    user.lastLoginAt = at
+  }
+  async findRefreshTokenByHash(hash: string) {
+    return [...this.tokens.values()].find(token => token.tokenHash === hash) ?? null
+  }
+  async createRefreshToken(input: {
+    id: string
+    familyId: string
+    userId: string
+    tokenHash: string
+    expiresAt: string
+  }) {
     this.operations.push(`create:${input.id}`)
     const record: RefreshTokenRecord = { ...input, revokedAt: null, replacedBy: null }
     this.tokens.set(record.id, record)
     return record
   }
-  async revokeRefreshToken(id: string, replacedBy?: string) { this.operations.push(`revoke:${id}`); const token = this.tokens.get(id); if (!token || token.revokedAt) return false; token.revokedAt = new Date().toISOString(); token.replacedBy = replacedBy ?? null; return true }
-  async revokeRefreshTokenFamily(familyId: string) { for (const token of this.tokens.values()) if (token.familyId === familyId && !token.revokedAt) token.revokedAt = new Date().toISOString() }
+  async revokeRefreshToken(id: string, replacedBy?: string) {
+    this.operations.push(`revoke:${id}`)
+    const token = this.tokens.get(id)
+    if (!token || token.revokedAt) return false
+    token.revokedAt = new Date().toISOString()
+    token.replacedBy = replacedBy ?? null
+    return true
+  }
+  async revokeRefreshTokenFamily(familyId: string) {
+    for (const token of this.tokens.values())
+      if (token.familyId === familyId && !token.revokedAt)
+        token.revokedAt = new Date().toISOString()
+  }
 }
 
 describe('AuthService', () => {
@@ -62,7 +140,12 @@ describe('AuthService', () => {
   beforeEach(async () => {
     repository = new FakeRepository()
     auth = new AuthService(repository, config)
-    user = await repository.createUser({ email: 'owner@example.com', passwordHash: await import('argon2').then(argon2 => argon2.default.hash('correct-password', { type: argon2.default.argon2id })) })
+    user = await repository.createUser({
+      email: 'owner@example.com',
+      passwordHash: await import('argon2').then(argon2 =>
+        argon2.default.hash('correct-password', { type: argon2.default.argon2id })
+      ),
+    })
   })
 
   it('logs in and rotates refresh tokens', async () => {
@@ -73,14 +156,22 @@ describe('AuthService', () => {
     const second = await auth.refresh(first.refreshToken)
     expect(repository.operations[0]).toMatch(/^create:/)
     expect(repository.operations[1]).toMatch(/^revoke:/)
-    await expect(auth.authenticateAccessToken(second.accessToken)).resolves.toMatchObject({ userId: user.id, sessionId: expect.any(String) })
+    await expect(auth.authenticateAccessToken(second.accessToken)).resolves.toMatchObject({
+      userId: user.id,
+      sessionId: expect.any(String),
+    })
     await expect(auth.refresh(first.refreshToken)).rejects.toMatchObject({ status: 401 })
   })
 
   it('rejects invalid credentials and verifies access identity', async () => {
-    await expect(auth.login('owner@example.com', 'wrong-password')).rejects.toMatchObject({ status: 401 })
+    await expect(auth.login('owner@example.com', 'wrong-password')).rejects.toMatchObject({
+      status: 401,
+    })
     const pair = await auth.login('owner@example.com', 'correct-password')
-    await expect(auth.verifyAccessToken(pair.accessToken)).resolves.toMatchObject({ userId: user.id, email: user.email })
+    await expect(auth.verifyAccessToken(pair.accessToken)).resolves.toMatchObject({
+      userId: user.id,
+      email: user.email,
+    })
   })
 
   it('revokes a refresh family on token replay', async () => {

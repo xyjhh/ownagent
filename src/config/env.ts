@@ -6,6 +6,7 @@ const schema = z.object({
   API_PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   WEB_ORIGIN: z.string().default('http://localhost:3000'),
   SUPABASE_URL: z.string().url(),
+  SUPABASE_PUBLIC_URL: z.string().url().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   SUPABASE_DB_SCHEMA: z
     .string()
@@ -13,7 +14,10 @@ const schema = z.object({
     .default('ownagent'),
   DATABASE_URL: z.string().url().default('postgresql://postgres:postgres@127.0.0.1:54322/postgres'),
   AUTH_JWT_SECRET: z.string().min(32),
-  AUTH_JWT_PREVIOUS_SECRET: z.string().min(32).optional(),
+  AUTH_JWT_PREVIOUS_SECRET: z.preprocess(
+    value => (value === '' ? undefined : value),
+    z.string().min(32).optional()
+  ),
   AUTH_JWT_ISSUER: z.string().default('ownagent'),
   AUTH_JWT_AUDIENCE: z.string().default('ownagent-api'),
   AUTH_COOKIE_ACCESS_NAME: z.string().default('ownagent_access'),
@@ -30,8 +34,12 @@ const schema = z.object({
   DEEPSEEK_API_KEY: z.string().optional(),
   DEEPSEEK_BASE_URL: z.string().url().default('https://api.deepseek.com/v1'),
   DEEPSEEK_MODEL: z.string().default('deepseek-chat'),
-  EMBEDDING_BASE_URL: z.string().url().default('http://127.0.0.1:8002/v1'),
-  EMBEDDING_MODEL: z.string().default('Qwen3-Embedding-0.6B'),
+  EMBEDDING_BASE_URL: z
+    .string()
+    .url()
+    .default('https://your-workspace-id.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'),
+  EMBEDDING_MODEL: z.string().default('qwen3.7-text-embedding-flash'),
+  EMBEDDING_API_KEY: z.string().optional(),
   DASHSCOPE_API_KEY: z.string().optional(),
   DASHSCOPE_WORKSPACE_ID: z.string().min(1).optional(),
   DASHSCOPE_REGION: z.string().default('cn-beijing'),
@@ -96,6 +104,7 @@ const schema = z.object({
     .optional(),
   SUPABASE_STORAGE_UPLOAD_TOKEN: z.string().min(1).optional(),
   SUPABASE_S3_ENDPOINT: z.string().url().optional(),
+  SUPABASE_S3_PUBLIC_ENDPOINT: z.string().url().optional(),
   SUPABASE_S3_ACCESS_KEY: z.string().min(1).optional(),
   SUPABASE_S3_SECRET_KEY: z.string().min(1).optional(),
   SUPABASE_S3_REGION: z.string().default('local').optional(),

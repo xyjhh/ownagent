@@ -3,6 +3,7 @@ create extension if not exists pgcrypto;
 -- ownagent uses a dedicated schema in the shared Supabase/PostgreSQL instance.
 -- Keep this schema separate from public tables owned by other projects.
 create schema if not exists ownagent;
+grant usage, create on schema ownagent to postgres;
 
 create table if not exists ownagent.app_users (
   id uuid primary key default gen_random_uuid(),

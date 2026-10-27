@@ -1,6 +1,5 @@
 param(
   [switch]$Build,
-  [switch]$Models,
   [switch]$Docker
 )
 
@@ -17,15 +16,13 @@ if ($LASTEXITCODE -ne 0) {
   throw 'Docker is not running. Start Docker Desktop and retry.'
 }
 
-if ($Models) { npm run models:start }
-
 if ($Docker) {
-  $composeArgs = @('compose', 'up', '-d')
+  $composeArgs = @('compose', 'up', '-d', '--wait')
   if ($Build) { $composeArgs += '--build' }
   & docker @composeArgs
   if ($LASTEXITCODE -ne 0) { throw 'Docker Compose failed to start the services. Check Docker registry/network access.' }
 } else {
-  & docker compose up -d redis
+  & docker compose up -d ownagent-redis
   if ($LASTEXITCODE -ne 0) { throw 'Redis failed to start. Check Docker Desktop.' }
   New-Item -ItemType Directory -Force -Path '.runtime' | Out-Null
   $commands = @(
@@ -55,14 +52,14 @@ if (-not $ready) {
 }
 
 Write-Host ''
-Write-Host 'OwnAgent services started:' -ForegroundColor Green
+Write-Host 'OwnAgent unified Compose services started:' -ForegroundColor Green
 docker compose ps
 Write-Host ''
 Write-Host 'API:      http://127.0.0.1:8787'
 Write-Host 'Health:   http://127.0.0.1:8787/health/ready'
 if ($Docker) {
   Write-Host 'Logs:     docker compose logs -f api worker document-worker memory-worker'
-  Write-Host 'Stop:     docker compose down'
+  Write-Host 'Stop:     docker compose down (volumes are retained)'
 } else {
   Write-Host 'Logs:     Get-Content .runtime/api.log -Wait (or another .runtime/*.log)'
   Write-Host 'Stop:     Get-Process powershell | ... ; docker compose stop redis'

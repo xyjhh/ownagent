@@ -117,15 +117,108 @@ export const DocumentComparisonSchema = z.object({
     .max(50),
   conclusion: z.string().max(5000),
 })
+
+const citationToolSchema = {
+  type: 'object',
+  properties: {
+    documentId: { type: 'string' },
+    versionId: { type: 'string' },
+    chunkId: { type: 'string' },
+    title: { type: 'string', maxLength: 500 },
+    pageNumber: { type: 'integer' },
+    headingPath: { type: 'array', items: { type: 'string' } },
+    quote: { type: 'string', maxLength: 2000 },
+  },
+  required: ['documentId', 'versionId', 'chunkId', 'title'],
+  additionalProperties: false,
+}
+const documentSummaryTool = {
+  name: 'submit_document_summary',
+  description: 'Submit a summary based only on the authorized document chunks.',
+  parameters: {
+    type: 'object',
+    properties: {
+      summary: { type: 'string', maxLength: 8000 },
+      keyPoints: { type: 'array', items: { type: 'string', maxLength: 1000 }, maxItems: 30 },
+      citations: { type: 'array', items: citationToolSchema, maxItems: 30 },
+    },
+    required: ['summary', 'keyPoints', 'citations'],
+    additionalProperties: false,
+  },
+}
+const documentComparisonTool = {
+  name: 'submit_document_comparison',
+  description: 'Submit a comparison based only on the authorized document chunks.',
+  parameters: {
+    type: 'object',
+    properties: {
+      topics: {
+        type: 'array',
+        maxItems: 50,
+        items: {
+          type: 'object',
+          properties: {
+            topic: { type: 'string', maxLength: 300 },
+            left: { type: 'string', maxLength: 2000 },
+            right: { type: 'string', maxLength: 2000 },
+            changeType: { type: 'string', enum: ['added', 'removed', 'changed', 'unchanged'] },
+            citations: { type: 'array', items: citationToolSchema, maxItems: 20 },
+          },
+          required: ['topic', 'left', 'right', 'changeType', 'citations'],
+          additionalProperties: false,
+        },
+      },
+      conclusion: { type: 'string', maxLength: 5000 },
+    },
+    required: ['topics', 'conclusion'],
+    additionalProperties: false,
+  },
+}
+const memoryCandidatesTool = {
+  name: 'submit_memory_candidates',
+  description: 'Submit explicit long-term memory candidates extracted from the user input.',
+  parameters: {
+    type: 'object',
+    properties: {
+      candidates: {
+        type: 'array',
+        maxItems: 20,
+        items: {
+          type: 'object',
+          properties: {
+            scope: { type: 'string', enum: ['user', 'workspace'] },
+            type: { type: 'string', enum: ['preference', 'fact', 'instruction'] },
+            key: { type: 'string', minLength: 1, maxLength: 100 },
+            value: { type: 'object', additionalProperties: true },
+            summary: { type: 'string', minLength: 1, maxLength: 500 },
+            confidence: { type: 'number', minimum: 0, maximum: 1 },
+            sensitivity: { type: 'string', enum: ['normal', 'sensitive'] },
+            autoSave: { type: 'boolean' },
+            sourceMessageId: { type: 'string' },
+          },
+          required: [
+            'scope',
+            'type',
+            'key',
+            'value',
+            'summary',
+            'confidence',
+            'sensitivity',
+            'autoSave',
+          ],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['candidates'],
+    additionalProperties: false,
+  },
+}
 export type DocumentSummary = z.infer<typeof DocumentSummarySchema>
 export type DocumentComparison = z.infer<typeof DocumentComparisonSchema>
 
 export type UserIntent =
-  | 'knowledge_query'
-  | 'document_summary'
-  | 'document_compare'
-  | 'general_chat'
-  | 'preference_update'
+  'knowledge_query' | 'document_summary' | 'document_compare' | 'general_chat' | 'preference_update'
 export type Citation = {
   documentId: string
   versionId: string
@@ -598,9 +691,12 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     if (state.intent !== 'document_summary' || !deps.model || !state.documentSources?.length)
       return {}
     const source = state.documentSources[0]
-    const result = await deps.model.chatJson(
+    const result = await deps.model.chatToolJson(
       [
-        { role: 'system', content: '请仅根据提供的文档内容输出 JSON 摘要，不得编造引用。' },
+        {
+          role: 'system',
+          content: '请仅根据提供的文档内容调用 submit_document_summary 提交摘要，不得编造引用。',
+        },
         {
           role: 'user',
           content: JSON.stringify({
@@ -612,6 +708,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         },
       ],
       DocumentSummarySchema,
+      documentSummaryTool,
       { trace: state.traceContext, operation: 'agent.document_summary' }
     )
     const validIds = new Set(source.chunks.map(c => c.chunkId))
@@ -631,15 +728,19 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
         s.chunks.map(c => `${s.documentId}:${s.versionId}:${c.chunkId}`)
       )
     )
-    const result = await deps.model.chatJson(
+    const result = await deps.model.chatToolJson(
       [
-        { role: 'system', content: '请仅根据已授权文档输出 JSON 比较结果，不得编造引用。' },
+        {
+          role: 'system',
+          content: '请仅根据已授权文档调用 submit_document_comparison 提交比较结果，不得编造引用。',
+        },
         {
           role: 'user',
           content: JSON.stringify({ documents: state.documentSources, request: state.input }),
         },
       ],
       DocumentComparisonSchema,
+      documentComparisonTool,
       { trace: state.traceContext, operation: 'agent.document_compare' }
     )
     result.topics = result.topics.map(topic => ({
@@ -784,12 +885,12 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
     if (!deps.model || !state.input)
       return { memoryCandidates: [], requiresMemoryConfirmation: false }
     try {
-      const result = await deps.model.chatJson(
+      const result = await deps.model.chatToolJson(
         [
           {
             role: 'system',
             content:
-              '只提取用户明确表达的长期记忆候选，禁止推测。敏感信息和事实不得自动保存。只输出 JSON，顶层必须是 {"candidates":[]}；候选字段必须包含 scope、type、key、value、summary、confidence、sensitivity、autoSave。没有候选时输出 {"candidates":[]}。',
+              '只提取用户明确表达的长期记忆候选，禁止推测。敏感信息和事实不得自动保存。调用 submit_memory_candidates 提交候选；没有候选时提交空数组。',
           },
           {
             role: 'user',
@@ -797,6 +898,7 @@ export function createKnowledgeAgentGraph(checkpointer?: unknown, deps: Knowledg
           },
         ],
         MemoryCandidatesSchema,
+        memoryCandidatesTool,
         { trace: state.traceContext, operation: 'agent.memory_candidates' }
       )
       const candidates: MemoryCandidate[] = result.candidates.map(c => ({

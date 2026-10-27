@@ -1,0 +1,22 @@
+{
+  auto_https off
+  admin off
+}
+
+:80 {
+  encode gzip
+
+  @ownagent path /api/* /ws /health/*
+  handle @ownagent {
+    reverse_proxy api:8787
+  }
+
+  @supabase path /auth/v1/* /rest/v1/* /graphql/v1 /storage/v1/* /realtime/v1/* /functions/v1/*
+  handle @supabase {
+    reverse_proxy kong:8000
+  }
+
+  handle {
+    reverse_proxy frontend:80
+  }
+}

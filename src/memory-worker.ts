@@ -59,6 +59,67 @@ const consolidationSchema = z.object({
     )
     .max(100),
 })
+const summaryTool = {
+  name: 'submit_conversation_summary',
+  description: 'Submit the merged conversation summary.',
+  parameters: {
+    type: 'object',
+    properties: { summary: { type: 'string', minLength: 1, maxLength: 12000 } },
+    required: ['summary'],
+    additionalProperties: false,
+  },
+}
+const titleTool = {
+  name: 'submit_conversation_title',
+  description: 'Submit a concise title for the conversation.',
+  parameters: {
+    type: 'object',
+    properties: { title: { type: 'string', maxLength: 120 } },
+    required: ['title'],
+    additionalProperties: false,
+  },
+}
+const reviewTool = {
+  name: 'submit_memory_review',
+  description: 'Submit the memory safety review decision.',
+  parameters: {
+    type: 'object',
+    properties: {
+      approved: { type: 'boolean' },
+      confidence: { type: 'number', minimum: 0, maximum: 1 },
+      reason: { type: 'string', maxLength: 500 },
+    },
+    required: ['approved', 'confidence'],
+    additionalProperties: false,
+  },
+}
+const consolidationTool = {
+  name: 'submit_memory_consolidation',
+  description: 'Submit consolidated versions of existing long-term memory items.',
+  parameters: {
+    type: 'object',
+    properties: {
+      merged: {
+        type: 'array',
+        maxItems: 100,
+        items: {
+          type: 'object',
+          properties: {
+            key: { type: 'string', minLength: 1, maxLength: 100 },
+            type: { type: 'string', enum: ['preference', 'fact', 'instruction'] },
+            value: { type: 'object', additionalProperties: true },
+            summary: { type: 'string', maxLength: 500 },
+            confidence: { type: 'number', minimum: 0, maximum: 1 },
+          },
+          required: ['key', 'type', 'value', 'summary', 'confidence'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['merged'],
+    additionalProperties: false,
+  },
+}
 async function lease(message: StreamMessage, fn: () => Promise<void>) {
   const timer = setInterval(
     () =>
@@ -161,19 +222,19 @@ async function execute(
       batches += 1
       deltaMessages += batch.batch.length
       estimatedInputTokens += batch.estimatedTokens
-      const result = await model.chatJson(
+      const result = await model.chatToolJson(
         [
           {
             role: 'system',
-            content: `你是会话摘要合并器。只输出 JSON：{"summary":"..."}。将已有摘要与新增消息合并为完整、简洁、可审计的会话摘要。保留仍有效的事实、实体规范名称、用户偏好、回答要求、已解决结论、未解决问题、文档标题和引用关系；以最新消息纠正旧信息，删除明确被否定的信息。不要添加对话外事实、隐藏推理或模型过程。摘要目标不超过约 ${outputBudget} tokens。`,
+            content: `你是会话摘要合并器。调用 submit_conversation_summary 提交摘要。将已有摘要与新增消息合并为完整、简洁、可审计的会话摘要。保留仍有效的事实、实体规范名称、用户偏好、回答要求、已解决结论、未解决问题、文档标题和引用关系；以最新消息纠正旧信息，删除明确被否定的信息。不要添加对话外事实、隐藏推理或模型过程。摘要目标不超过约 ${outputBudget} tokens。`,
           },
           { role: 'user', content: summaryPrompt(previousSummary, batch.batch) },
         ],
         summarySchema,
+        summaryTool,
         {
           model: config.DEEPSEEK_MODEL,
           timeoutMs: memoryTimeoutMs,
-          maxRetries: 1,
           trace,
           operation: 'memory.summarize_conversation',
         }
@@ -221,20 +282,20 @@ async function execute(
     let title = fallback
     if (model.isConfigured()) {
       try {
-        const result = await model.chatJson(
+        const result = await model.chatToolJson(
           [
             {
               role: 'system',
               content:
-                '你是会话标题生成器。只根据给定对话输出 JSON，格式必须是 {"title":"..."}。标题要简洁、具体、可扫描，长度约 6-18 个汉字或等价英文长度，跟随对话主要语言，不要添加引号、Markdown、前缀、句号或解释。',
+                '你是会话标题生成器。只根据给定对话调用 submit_conversation_title 提交标题。标题要简洁、具体、可扫描，长度约 6-18 个汉字或等价英文长度，跟随对话主要语言，不要添加引号、Markdown、前缀、句号或解释。',
             },
             { role: 'user', content: titlePrompt(messages) },
           ],
           titleSchema,
+          titleTool,
           {
             model: config.DEEPSEEK_MODEL,
             timeoutMs: memoryTimeoutMs,
-            maxRetries: 1,
             trace,
             operation: 'memory.update_title',
           }
@@ -256,12 +317,12 @@ async function execute(
       throw new Error('INVALID_MEMORY_REVIEW_TASK')
     const item = await memories.get(task.memoryItemId, task.userId, task.workspaceId)
     if (!item || item.status !== 'pending_confirmation') return
-    const decision = await model.chatJson(
+    const decision = await model.chatToolJson(
       [
         {
           role: 'system',
           content:
-            '你是记忆安全复核器。只能根据给定记忆判断是否为用户明确表达的、非敏感且可长期保存的信息。敏感信息不得批准。只输出 JSON。',
+            '你是记忆安全复核器。只能根据给定记忆判断是否为用户明确表达的、非敏感且可长期保存的信息。敏感信息不得批准。调用 submit_memory_review 提交决定。',
         },
         {
           role: 'user',
@@ -274,10 +335,10 @@ async function execute(
         },
       ],
       reviewSchema,
+      reviewTool,
       {
         model: config.DEEPSEEK_MODEL,
         timeoutMs: memoryTimeoutMs,
-        maxRetries: 1,
         trace,
         operation: 'memory.review_candidate',
       }
@@ -305,12 +366,12 @@ async function execute(
     const scope = payload.scope === 'workspace' ? 'workspace' : 'user'
     const items = await memories.activeForScope(task.workspaceId, task.userId, scope)
     if (items.length < 2) return
-    const result = await model.chatJson(
+    const result = await model.chatToolJson(
       [
         {
           role: 'system',
           content:
-            '你是长期记忆合并器。只能合并给定的同一权限范围记忆；不得发明事实。每个 key 最多输出一个结果，只输出 JSON。',
+            '你是长期记忆合并器。只能合并给定的同一权限范围记忆；不得发明事实。每个 key 最多提交一个结果，并调用 submit_memory_consolidation 返回合并结果。',
         },
         {
           role: 'user',
@@ -327,10 +388,10 @@ async function execute(
         },
       ],
       consolidationSchema,
+      consolidationTool,
       {
         model: config.DEEPSEEK_MODEL,
         timeoutMs: memoryTimeoutMs,
-        maxRetries: 1,
         trace,
         operation: 'memory.consolidate',
       }

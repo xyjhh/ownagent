@@ -1,74 +1,75 @@
+name: ownagent
+
+x-ownagent-environment: &ownagent-environment
+  env_file: .env
+  environment:
+    REDIS_URL: redis://ownagent-redis:6379
+    SUPABASE_URL: http://kong:8000
+    SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL:-${PUBLIC_BASE_URL:-http://localhost:8787}}
+    DATABASE_URL: postgresql://postgres:${SUPABASE_DB_PASSWORD:-postgres}@db:5432/postgres
+    SUPABASE_S3_ENDPOINT: http://kong:8000/storage/v1/s3
+    SUPABASE_S3_PUBLIC_ENDPOINT: ${SUPABASE_S3_PUBLIC_ENDPOINT:-${PUBLIC_BASE_URL:-http://localhost:8787}/storage/v1/s3}
+    LANGFUSE_BASE_URL: http://langfuse-web:3000
+
+x-worker: &worker
+  build: .
+  <<: *ownagent-environment
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+    kong:
+      condition: service_healthy
+    ownagent-redis:
+      condition: service_healthy
+    langfuse-web:
+      condition: service_healthy
+
 services:
   api:
     build: .
-    env_file: .env
-    environment:
-      # Containers must use the Compose service name, not their own localhost.
-      REDIS_URL: redis://redis:6379
-      SUPABASE_URL: http://host.docker.internal:54321
-      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
-      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "8787:8787"
-    depends_on:
-      redis:
-        condition: service_healthy
+    <<: *ownagent-environment
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    depends_on:
+      db:
+        condition: service_healthy
+      kong:
+        condition: service_healthy
+      ownagent-redis:
+        condition: service_healthy
+      langfuse-web:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8787/health/live').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   worker:
-    build: .
+    <<: *worker
     command: ["node", "dist/src/worker.js"]
-    env_file: .env
-    environment:
-      REDIS_URL: redis://redis:6379
-      SUPABASE_URL: http://host.docker.internal:54321
-      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
-      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    deploy:
-      replicas: 2
+
+  worker-2:
+    <<: *worker
+    command: ["node", "dist/src/worker.js"]
 
   document-worker:
-    build: .
+    <<: *worker
     command: ["node", "dist/src/document-worker.js"]
-    env_file: .env
-    environment:
-      REDIS_URL: redis://redis:6379
-      SUPABASE_URL: http://host.docker.internal:54321
-      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
-      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
 
   memory-worker:
-    build: .
+    <<: *worker
     command: ["node", "dist/src/memory-worker.js"]
-    env_file: .env
-    environment:
-      REDIS_URL: redis://redis:6379
-      SUPABASE_URL: http://host.docker.internal:54321
-      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
-      EMBEDDING_BASE_URL: http://host.docker.internal:8002/v1
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
 
-  redis:
-    image: redis:7-alpine
+  ownagent-redis:
+    image: redis:7.4.2-alpine
     command: >-
       sh -c "exec redis-server --appendonly yes
       --maxmemory \"$${REDIS_MAXMEMORY:-512mb}\"
@@ -77,16 +78,461 @@ services:
       REDIS_MAXMEMORY: ${REDIS_MAXMEMORY:-512mb}
       REDIS_MAXMEMORY_POLICY: ${REDIS_MAXMEMORY_POLICY:-noeviction}
     volumes:
-      - ownagent-redis:/data
-    ports:
-      # Also allows npm run dev / npm run dev:worker on the host to use this Redis.
-      - "127.0.0.1:6379:6379"
+      - ownagent-redis-data:/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
+
+  db:
+    image: public.ecr.aws/supabase/postgres:17.6.1.140
+    environment:
+      POSTGRES_PASSWORD: ${SUPABASE_DB_PASSWORD:-postgres}
+      POSTGRES_HOST: /var/run/postgresql
+      POSTGRES_USER: supabase_admin
+      POSTGRES_DB: postgres
+      JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      JWT_EXP: ${SUPABASE_JWT_EXPIRY:-3600}
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - supabase-db-data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  auth:
+    image: public.ecr.aws/supabase/gotrue:v2.192.0
+    command: ["auth"]
+    environment:
+      API_EXTERNAL_URL: ${SUPABASE_PUBLIC_URL:-${PUBLIC_BASE_URL:-http://localhost:8787}}/auth/v1
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgresql://supabase_auth_admin:${SUPABASE_DB_PASSWORD:-postgres}@db:5432/postgres
+      GOTRUE_SITE_URL: ${WEB_ORIGIN:-http://localhost:3000}
+      GOTRUE_URI_ALLOW_LIST: ${WEB_ORIGIN:-http://localhost:3000}
+      GOTRUE_DISABLE_SIGNUP: ${SUPABASE_DISABLE_SIGNUP:-false}
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${SUPABASE_JWT_EXPIRY:-3600}
+      GOTRUE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED: "false"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+      GOTRUE_PASSWORD_MIN_LENGTH: "8"
+      GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED: "true"
+      GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL: "10"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  rest:
+    image: public.ecr.aws/supabase/postgrest:v14.14
+    command: ["/bin/postgrest"]
+    environment:
+      PGRST_DB_URI: postgresql://authenticator:${SUPABASE_DB_PASSWORD:-postgres}@db:5432/postgres
+      PGRST_DB_SCHEMAS: public,graphql_public,ownagent
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_MAX_ROWS: "1000"
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      PGRST_ADMIN_SERVER_PORT: "3001"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+  storage:
+    image: public.ecr.aws/supabase/storage-api:v1.61.7
+    command: ["node", "dist/start/server.js"]
+    environment:
+      ANON_KEY: ${SUPABASE_ANON_JWT_KEY}
+      SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_JWT_KEY}
+      AUTH_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      DATABASE_URL: postgresql://supabase_storage_admin:${SUPABASE_DB_PASSWORD:-postgres}@db:5432/postgres
+      FILE_SIZE_LIMIT: ${DOCUMENT_MAX_FILE_SIZE_BYTES:-52428800}
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /mnt
+      TENANT_ID: stub
+      STORAGE_S3_REGION: local
+      GLOBAL_S3_BUCKET: stub
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+      TUS_URL_PATH: /storage/v1/upload/resumable
+      S3_PROTOCOL_ENABLED: "true"
+      S3_PROTOCOL_ACCESS_KEY_ID: ${SUPABASE_S3_ACCESS_KEY}
+      S3_PROTOCOL_ACCESS_KEY_SECRET: ${SUPABASE_S3_SECRET_KEY}
+      S3_PROTOCOL_NON_CANONICAL_HOST_HEADER: host
+      S3_PROTOCOL_PREFIX: /storage/v1
+      UPLOAD_FILE_SIZE_LIMIT: "52428800000"
+      UPLOAD_FILE_SIZE_LIMIT_STANDARD: "5242880000"
+      VECTOR_ENABLED: "true"
+      VECTOR_BUCKET_PROVIDER: pgvector
+      VECTOR_STORE_MIGRATIONS_ENABLED: "true"
+      VECTOR_DATABASE_URL: postgresql://postgres:${SUPABASE_DB_PASSWORD:-postgres}@db:5432/postgres
+    volumes:
+      - supabase-storage-data:/mnt
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5000/status').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  realtime:
+    image: public.ecr.aws/supabase/realtime:v2.112.1
+    command: ["/app/bin/server"]
+    environment:
+      PORT: "4000"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${SUPABASE_DB_PASSWORD:-postgres}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: SET search_path TO realtime
+      DB_ENC_KEY: ${SUPABASE_REALTIME_DB_ENC_KEY:-ownagent-realtime}
+      API_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      METRICS_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      APP_NAME: realtime
+      SECRET_KEY_BASE: ${SUPABASE_REALTIME_SECRET_KEY}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      MAX_HEADER_LENGTH: "4096"
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "-H", "Host:realtime-dev", "http://127.0.0.1:4000/api/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  edge-functions:
+    image: public.ecr.aws/supabase/edge-runtime:v1.74.2
+    command: ["start", "--main-service", "/home/deno/functions/main"]
+    environment:
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_JWT_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_JWT_KEY}
+      SUPABASE_DB_URL: postgresql://postgres:${SUPABASE_DB_PASSWORD:-postgres}@db:5432/postgres
+      SUPABASE_INTERNAL_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      SUPABASE_INTERNAL_HOST_PORT: "8000"
+      SUPABASE_INTERNAL_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      SUPABASE_INTERNAL_SECRET_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_INTERNAL_FUNCTIONS_CONFIG: '{"main":{"verifyJWT":true,"entrypointPath":"functions/main/index.ts"}}'
+    volumes:
+      - ./supabase/functions:/home/deno/functions:ro
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "edge-runtime", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  kong:
+    build:
+      context: ./infra/supabase
+      dockerfile: Dockerfile.kong
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - envsubst '$$SUPABASE_SERVICE_ROLE_KEY $$SUPABASE_SERVICE_ROLE_JWT_KEY $$SUPABASE_PUBLISHABLE_KEY $$SUPABASE_ANON_KEY' < /home/kong/kong.template.yml > /home/kong/kong.yml; exec /docker-entrypoint.sh kong docker-start
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+      KONG_NGINX_WORKER_PROCESSES: "1"
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_JWT_KEY}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      SUPABASE_SERVICE_ROLE_JWT_KEY: ${SUPABASE_SERVICE_ROLE_JWT_KEY}
+      SUPABASE_ANON_JWT_KEY: ${SUPABASE_ANON_JWT_KEY}
+    volumes:
+      - ./infra/supabase/kong.template.yml:/home/kong/kong.template.yml:ro
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      storage:
+        condition: service_healthy
+      realtime:
+        condition: service_healthy
+      edge-functions:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  meta:
+    image: public.ecr.aws/supabase/postgres-meta:v0.96.6
+    environment:
+      PG_META_PORT: "8080"
+      PG_META_DB_HOST: db
+      PG_META_DB_NAME: postgres
+      PG_META_DB_USER: postgres
+      PG_META_DB_PORT: "5432"
+      PG_META_DB_PASSWORD: ${SUPABASE_DB_PASSWORD:-postgres}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  studio:
+    image: public.ecr.aws/supabase/studio:2026.06.29-sha-20290c7
+    ports:
+      - "127.0.0.1:54323:3000"
+    environment:
+      STUDIO_PG_META_URL: http://meta:8080
+      POSTGRES_PASSWORD: ${SUPABASE_DB_PASSWORD:-postgres}
+      SUPABASE_URL: http://kong:8000
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL:-${PUBLIC_BASE_URL:-http://localhost:8787}}
+      AUTH_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_JWT_KEY}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_ROLE_JWT_KEY}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY}
+      SUPABASE_SECRET_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      S3_PROTOCOL_ACCESS_KEY_ID: ${SUPABASE_S3_ACCESS_KEY}
+      S3_PROTOCOL_ACCESS_KEY_SECRET: ${SUPABASE_S3_SECRET_KEY}
+      PGRST_DB_SCHEMAS: public,graphql_public,ownagent
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_MAX_ROWS: "1000"
+      NEXT_PUBLIC_ENABLE_LOGS: "false"
+      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+      DEFAULT_ORGANIZATION_NAME: OwnAgent
+      DEFAULT_PROJECT_NAME: OwnAgent
+    restart: unless-stopped
+    depends_on:
+      kong:
+        condition: service_healthy
+      meta:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://studio:3000/api/platform/profile').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  langfuse-postgres:
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_POSTGRES_PASSWORD}
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8.14.39-alpine
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-redis:
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    command: ["redis-server", "--requirepass", "${LANGFUSE_REDIS_PASSWORD}"]
+    environment:
+      LANGFUSE_REDIS_PASSWORD: ${LANGFUSE_REDIS_PASSWORD}
+    volumes:
+      - langfuse-redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$${LANGFUSE_REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+    volumes:
+      - langfuse-minio-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  langfuse-minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    restart: "no"
+    depends_on:
+      langfuse-minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${LANGFUSE_MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+    entrypoint: >-
+      /bin/sh -c "mc alias set local http://langfuse-minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing local/langfuse-events"
+
+  langfuse-web:
+    image: langfuse/langfuse:3.225.2
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment: &langfuse-environment
+      NODE_ENV: production
+      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3001}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY}
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD}@langfuse-postgres:5432/langfuse
+      DIRECT_URL: postgresql://langfuse:${LANGFUSE_POSTGRES_PASSWORD}@langfuse-postgres:5432/langfuse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://default:${LANGFUSE_CLICKHOUSE_PASSWORD}@langfuse-clickhouse:9000/default
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_CONNECTION_STRING: redis://:${LANGFUSE_REDIS_PASSWORD}@langfuse-redis:6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse-events
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_MINIO_ROOT_USER}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_MINIO_ROOT_PASSWORD}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_INIT_ORG_ID: ownagent
+      LANGFUSE_INIT_ORG_NAME: OwnAgent
+      LANGFUSE_INIT_PROJECT_ID: ownagent
+      LANGFUSE_INIT_PROJECT_NAME: OwnAgent
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${ADMIN_EMAIL}
+      LANGFUSE_INIT_USER_NAME: OwnAgent Admin
+      LANGFUSE_INIT_USER_PASSWORD: ${ADMIN_PASSWORD}
+      TELEMETRY_ENABLED: "false"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://langfuse-web:3000/api/public/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3.225.2
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio-init:
+        condition: service_completed_successfully
+    environment: *langfuse-environment
+
+  frontend:
+    build:
+      context: ../ownagentweb
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+        VITE_WS_URL: /ws
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  caddy:
+    image: caddy:2.9.1-alpine
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      kong:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  cloudflared:
+    image: cloudflare/cloudflared:2025.11.1
+    restart: unless-stopped
+    depends_on:
+      caddy:
+        condition: service_started
+    command: ["tunnel", "--no-autoupdate", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:-}"]
 
 volumes:
-  ownagent-redis:
+  ownagent-redis-data:
+    name: ownagent_ownagent-redis-compose
+  supabase-db-data:
+    name: ownagent-compose-supabase-db
+  supabase-storage-data:
+    name: ownagent-compose-supabase-storage
+  langfuse-postgres-data:
+    name: ownagent_langfuse-postgres
+  langfuse-clickhouse-data:
+    name: ownagent_langfuse-clickhouse
+  langfuse-redis-data:
+    name: ownagent_langfuse-redis
+  langfuse-minio-data:
+    name: ownagent_langfuse-minio
+  caddy-data:
+  caddy-config:

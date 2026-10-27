@@ -1,0 +1,94 @@
+_format_version: '1.1'
+
+services:
+  - name: auth
+    url: http://auth:9999/
+    routes:
+      - name: auth
+        paths: ['/auth/v1/']
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config: &auth_headers
+          add:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '${SUPABASE_SERVICE_ROLE_KEY}' and 'Bearer ${SUPABASE_SERVICE_ROLE_JWT_KEY}') or (headers.apikey == '${SUPABASE_PUBLISHABLE_KEY}' and 'Bearer ${SUPABASE_ANON_KEY}') or headers.apikey)"
+          replace:
+            headers:
+              - "Authorization: $((headers.authorization ~= nil and headers.authorization:sub(1, 10) ~= 'Bearer sb_' and headers.authorization) or (headers.apikey == '${SUPABASE_SERVICE_ROLE_KEY}' and 'Bearer ${SUPABASE_SERVICE_ROLE_JWT_KEY}') or (headers.apikey == '${SUPABASE_PUBLISHABLE_KEY}' and 'Bearer ${SUPABASE_ANON_KEY}') or headers.apikey)"
+
+  - name: rest
+    url: http://rest:3000/
+    routes:
+      - name: rest
+        paths: ['/rest/v1/']
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config: *auth_headers
+
+  - name: graphql
+    url: http://rest:3000/rpc/graphql
+    routes:
+      - name: graphql
+        paths: ['/graphql/v1']
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config: *auth_headers
+
+  - name: functions
+    url: http://edge-functions:8081/
+    routes:
+      - name: functions
+        paths: ['/functions/v1/']
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config: *auth_headers
+
+  - name: storage-s3
+    url: http://storage:5000/s3
+    routes:
+      - name: storage-s3
+        paths: ['/storage/v1/s3/']
+        strip_path: true
+        preserve_host: true
+    plugins:
+      - name: cors
+
+  - name: storage
+    url: http://storage:5000/
+    routes:
+      - name: storage
+        paths: ['/storage/v1/']
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config: *auth_headers
+
+  - name: realtime-ws
+    url: http://realtime:4000/socket
+    protocol: ws
+    routes:
+      - name: realtime-ws
+        paths: ['/realtime/v1/']
+        strip_path: true
+    plugins:
+      - name: cors
+
+  - name: realtime-rest
+    url: http://realtime:4000/api
+    routes:
+      - name: realtime-rest
+        paths: ['/realtime/v1/api']
+        strip_path: true
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config: *auth_headers

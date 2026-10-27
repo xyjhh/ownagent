@@ -15,11 +15,19 @@ export class EmbeddingClient {
     private readonly tracer?: LangfuseTracer
   ) {}
 
-  async health(): Promise<'ok' | 'unavailable'> {
+  async health(): Promise<'ok' | 'configured' | 'unavailable'> {
+    const isLocal = /^(https?:\/\/)?(127\.0\.0\.1|localhost|host\.docker\.internal)(:\d+)?\b/i.test(
+      this.config.EMBEDDING_BASE_URL
+    )
+    if (!isLocal) return this.apiKey() ? 'configured' : 'unavailable'
     return probe(
       `${this.config.EMBEDDING_BASE_URL.replace(/\/v1\/?$/, '')}/health`,
       this.config.MODEL_TIMEOUT_MS
     )
+  }
+
+  private apiKey() {
+    return this.config.EMBEDDING_API_KEY || this.config.DASHSCOPE_API_KEY
   }
 
   async embed(
@@ -34,11 +42,15 @@ export class EmbeddingClient {
         inputCount: Array.isArray(input) ? input.length : 1,
       })
     try {
+      const apiKey = this.apiKey()
       const result = await fetchJson<EmbeddingResponse>(
         `${this.config.EMBEDDING_BASE_URL}/embeddings`,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+          },
           body: JSON.stringify({ model: this.config.EMBEDDING_MODEL, input }),
         },
         this.config.MODEL_TIMEOUT_MS

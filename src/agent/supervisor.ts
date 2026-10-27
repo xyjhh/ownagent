@@ -164,6 +164,65 @@ export const supervisorDecisionSchema = z.preprocess(
   supervisorDecisionObjectSchema
 )
 
+const supervisorDecisionTool = {
+  name: 'submit_supervisor_decision',
+  description: 'Submit the validated intent, execution plan, and any clarification request.',
+  parameters: {
+    type: 'object',
+    properties: {
+      intent: {
+        type: 'string',
+        enum: [
+          'knowledge_query',
+          'document_summary',
+          'document_compare',
+          'general_chat',
+          'preference_update',
+        ],
+      },
+      needsRetrieval: { type: 'boolean' },
+      query: { type: 'string', maxLength: 4000 },
+      documentIds: {
+        type: 'array',
+        items: { type: 'string', format: 'uuid' },
+        maxItems: 20,
+      },
+      plan: {
+        type: 'array',
+        items: {
+          type: 'string',
+          enum: ['search_knowledge', 'get_document', 'compare_documents', 'generate_answer'],
+        },
+        minItems: 1,
+        maxItems: 4,
+      },
+      requiresApproval: { type: 'boolean' },
+      confidence: { type: 'number', minimum: 0, maximum: 1 },
+      reason: { type: 'string', maxLength: 500 },
+      needsClarification: { type: 'boolean' },
+      clarificationQuestion: { type: 'string', minLength: 1, maxLength: 1000 },
+      clarificationOptions: {
+        type: 'array',
+        items: { type: 'string', minLength: 1, maxLength: 200 },
+        maxItems: 6,
+      },
+      containsUserPreference: { type: 'boolean' },
+      preferenceOnly: { type: 'boolean' },
+    },
+    required: [
+      'intent',
+      'needsRetrieval',
+      'plan',
+      'requiresApproval',
+      'confidence',
+      'needsClarification',
+      'containsUserPreference',
+      'preferenceOnly',
+    ],
+    additionalProperties: false,
+  },
+} as const
+
 export type SupervisorDecision = z.infer<typeof supervisorDecisionSchema>
 export type SupervisorContext = {
   workspaceId: string
@@ -262,7 +321,7 @@ export class SupervisorAgent {
       {
         role: 'system' as const,
         content:
-          '你是企业知识库任务规划器。只输出一个合法 JSON 对象，不要 Markdown、代码围栏、解释或额外字段。输出格式示例：{"intent":"knowledge_query","needsRetrieval":true,"query":"问题改写，可选","documentIds":[],"plan":["search_knowledge","generate_answer"],"requiresApproval":false,"confidence":0.9,"reason":"可选简短原因","needsClarification":false,"clarificationQuestion":"可选的面向用户的问题","clarificationOptions":[],"containsUserPreference":false,"preferenceOnly":false}。intent 只能是 knowledge_query、document_summary、document_compare、general_chat、preference_update；preference_update 只用于用户明确表达偏好、习惯或回答格式要求。用户偏好字段：containsUserPreference 表示输入是否包含长期偏好，preferenceOnly 表示整条输入只有偏好且不需要知识库回答。preferenceOnly=true 时必须使用 intent=preference_update、needsRetrieval=false、plan=["generate_answer"]，不得检索知识库。偏好与知识问题同时出现时，containsUserPreference=true 但 preferenceOnly=false，保留知识问题的检索计划。用户明确表达“我主要用 TypeScript”“以后示例尽量用 TypeScript”属于偏好，不要当作知识库问题。不明确时选择只读 knowledge_query。信息不足以安全执行时或者根据上下文无法判断用户需要的信息时设置 needsClarification=true，提供简短的 clarificationQuestion；存在有限选择时提供最多 6 个 clarificationOptions，不要猜测用户未提供的信息。只能选择允许的 intent 和 plan，不能执行工具、决定权限或编造事实。涉及写操作时 requiresApproval 必须为 true。' +
+          '你是企业知识库任务规划器。必须调用 submit_supervisor_decision 工具提交决策，不要在普通文本中回答。intent 只能是 knowledge_query、document_summary、document_compare、general_chat、preference_update；preference_update 只用于用户明确表达偏好、习惯或回答格式要求。用户偏好字段：containsUserPreference 表示输入是否包含长期偏好，preferenceOnly 表示整条输入只有偏好且不需要知识库回答。preferenceOnly=true 时必须使用 intent=preference_update、needsRetrieval=false、plan=["generate_answer"]，不得检索知识库。偏好与知识问题同时出现时，containsUserPreference=true 但 preferenceOnly=false，保留知识问题的检索计划。用户明确表达“我主要用 TypeScript”“以后示例尽量用 TypeScript”属于偏好，不要当作知识库问题。不明确时选择只读 knowledge_query。信息不足以安全执行时或者根据上下文无法判断用户需要的信息时设置 needsClarification=true，提供简短的 clarificationQuestion；存在有限选择时提供最多 6 个 clarificationOptions，不要猜测用户未提供的信息。只能选择允许的 intent 和 plan，不能执行工具、决定权限或编造事实。涉及写操作时 requiresApproval 必须为 true。' +
           ' 如果当前问题包含“他/她/这个人/这个项目/上一份资料”等指代，先结合 conversationSummary 和 recentMessages 解析。最近上下文中只有一个明确实体时直接解析，并把解析后的完整问题写入 query；上一轮助手纠正过名称时优先使用纠正后的规范名称。只有存在多个候选实体，或没有任何可用上下文时，才设置 needsClarification=true。needsClarification 只由语义是否有歧义决定，不要仅因为 confidence 数值较低而澄清。',
       },
       {
@@ -283,10 +342,10 @@ export class SupervisorAgent {
       },
     ]
     try {
-      const decision = await this.model.chatJson(
+      const decision = await this.model.chatToolJson(
         messages,
         supervisorDecisionSchema,
-        this.options.maxRetries,
+        supervisorDecisionTool,
         {
           model: this.options.model,
           timeoutMs: this.options.timeoutMs,
