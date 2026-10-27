@@ -52,45 +52,27 @@ flowchart TD
 
 ## 本地开发配置与启动
 
-复制环境变量模板：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-填写至少以下服务配置：
-
-- Supabase：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`DATABASE_URL`
-- 认证：`AUTH_JWT_SECRET`（至少 32 个字符）、`ADMIN_EMAIL`、`ADMIN_PASSWORD`
-- Agent：`DEEPSEEK_API_KEY`
-- Embedding：`EMBEDDING_BASE_URL`、`EMBEDDING_MODEL`
-- Reranker：`DASHSCOPE_API_KEY`，以及 `DASHSCOPE_WORKSPACE_ID` 或 `DASHSCOPE_RERANK_URL`
-- 文档对象存储：按部署环境配置 `SUPABASE_S3_ENDPOINT`、`SUPABASE_S3_ACCESS_KEY`、`SUPABASE_S3_SECRET_KEY` 等 Storage 设置
-
-`SUPABASE_DB_SCHEMA` 默认是 `ownagent`。使用 Supabase REST API 时，在 Dashboard 的 **Settings → API → Exposed schemas** 中加入 `ownagent`。先按顺序应用 `supabase/migrations/` 中尚未执行的迁移（当前最新为 `020_document_replace_uploads.sql`）；迁移不会由启动脚本自动执行。部署已有环境时，只执行尚未应用的迁移。
-
-创建首个所有者账号并启动全部本机服务：
+开发环境与生产环境完全隔离。开发电脑使用仓库内的 Supabase CLI、本地 Redis 和独立 Langfuse，API/Worker/前端在宿主机热更新；生产环境仍使用根目录统一 Compose。
 
 ```powershell
 npm install
-npm run auth:bootstrap
-npm run start:all
+if (-not (Test-Path .env.development)) { Copy-Item .env.development.example .env.development }
+notepad .env.development
+npm run setup:dev
+npm run start:dev
 ```
 
-`start:all` 会启动 Redis，以及 API、Agent Worker、Document Worker 和 Memory Worker。API 默认监听 `http://127.0.0.1:8787`。日志写入 `.runtime/*.log`。停止服务：
+前端在同级项目单独启动：
 
 ```powershell
-npm run stop:all
-```
-
-如果只需单独运行某个服务，可使用：
-
-```powershell
+cd ..\ownagentweb
+npm install
 npm run dev
-npm run dev:worker
-npm run dev:document-worker
-npm run dev:memory-worker
 ```
+
+开发 API 是 `http://127.0.0.1:8787`，前端是 `http://127.0.0.1:5173`，Supabase Studio 是 `http://127.0.0.1:54323`，Langfuse 是 `http://127.0.0.1:3002`。详细边界和清理方式见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+
+生产配置和启动方式见下节；不要将生产 `.env` 复制为 `.env.development`。
 
 生产部署使用根目录的单一 Docker Compose 项目。前端位于同级目录 `../ownagentweb`，由 Compose 构建为静态站点；项目包含 OwnAgent 的前端、API/Worker、Supabase 数据库、Auth、REST、Storage、Realtime、Edge Functions、Studio、Langfuse、Caddy 和 Cloudflare Tunnel。DeepSeek、DashScope 和远程 Embedding 仍然是外部 API。
 
