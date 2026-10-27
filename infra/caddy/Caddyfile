@@ -16,6 +16,16 @@
     reverse_proxy kong:8000
   }
 
+  @login path /login /login/*
+  handle @login {
+    reverse_proxy login-ssr:3000 {
+      @upstream_error status 5xx
+      handle_response @upstream_error {
+        reverse_proxy frontend:80
+      }
+    }
+  }
+
   handle {
     reverse_proxy frontend:80
   }
